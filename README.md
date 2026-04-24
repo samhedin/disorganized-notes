@@ -3,6 +3,8 @@ A note-taking app that supports tables, lists, reminders, timers, alarms, images
 
 [Android](https://play.google.com/store/apps/details?id=com.disorganized.disorganized&pli=1&gl=cn), [iOS](https://apps.apple.com/us/app/disorganized-notes-todo/id6738280174), [web (requires subscription)](https://app.getdisorganized.com/)
 
+Visit our [Discord!](https://discord.gg/UEeughB9Qn)
+
 <img width="258" height="559" alt="2" src="https://github.com/user-attachments/assets/dd56db14-5e9c-44f1-b12b-ad1eddd0e832" />
 
 
