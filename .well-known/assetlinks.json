@@ -1,0 +1,9 @@
+[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "com.disorganized.disorganized",
+    "sha256_cert_fingerprints":
+    ["AC:0F:33:72:B0:BC:DC:B6:08:D1:6C:05:DF:CC:B7:5E:F5:14:E9:9E:D6:C6:00:47:A8:F2:D0:A0:E4:78:15:8F"]
+  }
+}]

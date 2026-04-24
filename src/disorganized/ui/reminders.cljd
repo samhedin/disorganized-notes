@@ -1,0 +1,138 @@
+(ns disorganized.ui.reminders
+  (:require ["package:disorganized_notes/DateFormatter.dart" :as df]
+            ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+
+            [clojure.string :as string]
+            [disorganized.model :as model]
+            [hti.re-dash.alpha :as rd]
+            ["package:go_router/go_router.dart" :as go_router]
+            [disorganized.ui.read :as read]
+            ["package:flutter/material.dart" :as m]
+            [cljd.flutter :as f]))
+
+(defn make-description
+  [^DateTime date description section-name note timeformat-24-hours? finished?]
+  (let [non-reminder-sections  (filter (fn [[_ section]]
+                                         (not= "reminder" (section "type")))
+                                       (:sections note))
+        dt (df/DateFormatter.getVerboseDateTimeRepresentation (.toLocal date) timeformat-24-hours?)
+        desc (cond (-> description string/blank? not) description
+                   (-> note :plaintext string/blank? not) (:plaintext note)
+                   (seq non-reminder-sections)
+                   (model/make-plaintext (first non-reminder-sections) timeformat-24-hours?)
+                   :else "")]
+    (cond
+      (and finished? (string/blank? desc)) dt
+      finished? desc
+      :else (str dt
+                 (when desc (str ": " desc))))))
+
+(defn- reminders-list [notes-with-reminders saved-notes id->saved-notes-index ctx timeformat-24-hours?]
+  (for [{:strs [note-id section-name description ^Timestamp datetime finished]}
+        notes-with-reminders
+        :let [date- (.toDate datetime)
+              passed? (.isAfter (DateTime.now) date-)
+              note (nth saved-notes (id->saved-notes-index note-id))]]
+    (f/widget
+     :get {{tthm .-textTheme} m/Theme}
+     (m/InkWell
+      .onTap (fn []
+               (rd/dispatch [::model/set-current-note-id note-id])
+               (rd/dispatch [::model/set-new-plaintext (:plaintext note)])
+               (rd/dispatch [::model/set-key :override-title (str (:title note))])
+               nil)
+      .child
+      (m/Row
+       .children [(m/Flexible
+                   .flex 1
+                   .child (m/Checkbox .value
+                                      finished
+                                      .onChanged
+                                      (fn [b]
+                                        (rd/dispatch
+                                         [::model/save-note
+                                          {:note (assoc-in note
+                                                           [:sections section-name "content"
+                                                            "finished"]
+                                                           b)
+                                           :update-created-at? false}])
+                                        (rd/dispatch [::model/refresh-notes]))))
+                  (m/Expanded
+                   .flex 10
+                   .child (m/Text
+                           (make-description date- description section-name note timeformat-24-hours? finished)
+                           .style
+                           (cond finished (m/TextStyle
+                                           .decoration
+                                           (m/TextDecoration.lineThrough)
+                                           .decorationThickness 1.5)
+                                 passed? (m/TextStyle .decoration
+                                                      (m/TextDecoration.underline)
+                                                      .decorationThickness 1.5
+                                                      .decorationColor
+                                                      m/Colors.red)
+                                 :else (.copyWith
+                                        (.-bodyLarge tthm) .decoration
+                                        (m/TextDecoration.none)))))])))))
+
+(def ^m/Widget show
+  (f/build
+   [^go_router/GoRouterState router-state]
+   (f/widget
+    :watch
+    [id->saved-notes-index (rd/subscribe [::model/id->saved-notes-index])
+     saved-notes (rd/subscribe [::model/get-notes])
+     {:strs [checked-lists-start-expanded]} (rd/subscribe [::model/get-user-options])]
+    
+    :managed [notes-with-reminders
+              (let [user-id (model/uid)
+                    reminders (model/sort-reminders (flatten
+                                               (for [n saved-notes
+                                                     :let [reminder-data (model/note-reminders n)]
+                                                     :when (seq reminder-data)]
+                                                 (mapv #(assoc % :note n) reminder-data))))]
+
+                (when (seq reminders)
+                  (rd/dispatch [::load-fcm]))
+                reminders) :dispose nil]
+    
+    :get [:timeformat-24-hours?]
+    :context ctx
+    :get {{tthm .-textTheme} m/Theme}
+    :let [{finished-notes true
+           unfinished-notes false} (group-by #(% "finished") notes-with-reminders)
+          children (concat
+                    (reminders-list unfinished-notes saved-notes id->saved-notes-index ctx timeformat-24-hours?)
+                    (when (seq finished-notes)
+                      [(m/ExpansionTile
+                        .title (m/Text (str (count finished-notes)
+                                            " checked reminders")
+                                       .style (.-titleMedium tthm))
+                        .initiallyExpanded (if (some? checked-lists-start-expanded)
+                                             checked-lists-start-expanded
+                                             (> 5 (count finished-notes)))
+                        .children
+                        (reminders-list finished-notes saved-notes id->saved-notes-index ctx timeformat-24-hours?))]))]
+
+    (m/Scaffold
+     .appBar (m/AppBar)
+     .body
+     (if (empty? notes-with-reminders)
+       (f/widget
+        :padding {:horizontal 10
+                  :top 10}
+        m/Center
+        (m/Column
+         .children
+         [(m/Text "Reminders"
+                  .style (.-titleLarge tthm))
+          (m/Text
+           "This page shows all reminders you've added to your notes!
+You don't seem to have any reminders set, I envy you.")]))
+       (f/widget
+        :padding {:horizontal 20}
+        (m/ListView.builder
+         .itemCount (count children)
+         .itemBuilder
+         (fn [_ i]
+           (nth children i)))))))))

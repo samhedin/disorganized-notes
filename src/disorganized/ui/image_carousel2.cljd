@@ -1,0 +1,976 @@
+(ns disorganized.ui.image-carousel2
+  (:require  ["package:flutter/material.dart" :as m]
+             ["package:path/path.dart" :refer [basename]]
+             ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+             ["package:path_provider/path_provider.dart" :refer [getTemporaryDirectory]]
+             ["package:flutter_colorpicker/flutter_colorpicker.dart" :as cp]
+
+             ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage CachedNetworkImageProvider]]
+             ["package:photo_view/photo_view.dart" :as pg]
+             ["package:photo_view/photo_view_gallery.dart" :refer [PhotoViewGallery PhotoViewGalleryPageOptions]]
+             ["package:mime/mime.dart" :refer [lookupMimeType]]
+             ["package:http/http.dart" :as http]
+             ["package:share_plus/share_plus.dart" :refer [XFile Share SharePlus ShareParams]]
+             [cljd.flutter :as f]
+             [hti.re-dash.alpha :as rd]
+             ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+             ["package:go_router/go_router.dart" :as go_router]
+             ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+             [disorganized.ui.theme :as theme]
+             [disorganized.model :as model]
+             [clojure.string :refer [split]]
+             [disorganized.ui.popup :as popup]
+             ["dart:core" :refer [Uri]]
+             ["dart:io" :refer [File Directory]]
+             ["package:flutter_painter_v2/flutter_painter.dart" :as fp]
+             ["package:flutter_painter_v2/flutter_painter_pure.dart" :as fpp]
+             ["package:flutter_painter_v2/flutter_painter_extensions.dart" :as fpe]
+             ["dart:ui" :as ui]
+             [clojure.string :as string]))
+
+(defn set-grid-interval [ctx *grid-interval grid-interval premium? section-id]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+
+    :watch [gv (atom grid-interval) :as *gv]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Set grid size"
+               .style (.-titleLarge tthm))
+       (m/Text (str "Current: " (string/join (take 4 (str @*grid-interval)))))
+       (m/Slider
+        .value (or gv 0)
+        .onChanged (fn [v]
+
+                     (if (or true premium?)
+                       (do (reset! *grid-interval v)
+                           (reset! *gv v)
+                           (rd/dispatch
+                            [::model/update-current-note
+                             (fn [m]
+                               (assoc-in m [:sections section-id "grid-interval"] v))]))
+                       (await (model/paywall scaffold-messenger))))
+        .label (string/join (take 4 (str gv)))
+        .divisions 10
+        .min 0
+        .max 200)])
+     .actions [(m/TextButton
+                .onPressed (fn []
+                             (reset! *grid-interval 0)
+                             (reset! *gv 0)
+                             (rd/dispatch
+                              [::model/update-current-note
+                               (fn [m]
+                                 (assoc-in m [:sections section-id "grid-interval"] 0))])
+                             (.pop navigator))
+                .child (m/Text "Disable grid"))
+
+               (m/TextButton
+                .onPressed (fn []
+                             (.pop navigator))
+                .child (m/Text "Ok"))]))))
+
+(defn drawing-icon [label-text icon onpressed selected-button]
+  (f/widget
+   :get {{cs .-colorScheme} m/Theme}
+   (m/FittedBox
+    .fit m/BoxFit.contain)
+   (m/InkWell
+    .customBorder (m/RoundedRectangleBorder
+                   .borderRadius theme/border-radius)
+
+    .onTap onpressed)
+   (m/Container
+    .padding (m/EdgeInsets.all 8)
+    .decoration (m/BoxDecoration
+                 .color (if (= selected-button label-text)
+                          (.-surfaceContainerHighest cs)
+                          m/Colors.transparent)
+                 .borderRadius theme/border-radius)
+
+    .child
+    (f/widget
+
+     (m/Column
+      .children [icon
+
+                 (m/Text label-text
+                         .style (m/TextStyle
+                                 .fontWeight m/FontWeight.bold))])))))
+
+(defn image-textfield [section-id url]
+  (f/widget
+   :managed [caption-tc (m/TextEditingController)]
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+   :padding {:horizontal 20}
+   :let [captions (or (content "captions") {})]
+   :get {{tthm .-textTheme} m/Theme}
+
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+   :managed [focus-node (m/FocusNode)
+             _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                    (fn [_]
+                      (when (string/blank? (.-text caption-tc))
+                        (.-text! caption-tc
+                                 (str (when captions
+                                        (captions url)))))
+                      nil))
+                   nil) :dispose nil]
+   :bg-watcher ([focused? focus-node :> .-hasFocus]
+                (when-not focused?
+                  (println "updating caption " (.-text caption-tc))
+                  (rd/dispatch [::model/update-current-note
+                                (fn [m]
+                                  (update-in
+                                   m
+                                   [:sections section-id "content" "captions"]
+                                   (fn [captions]
+                                     (assoc (or captions {}) url (.-text caption-tc)))))])))
+
+   (m/TextField
+    .textCapitalization m/TextCapitalization.sentences
+    .maxLines nil
+    .autocorrect true
+    .decoration (m/InputDecoration
+                 .hintText "Caption "
+                 .hintStyle (.merge
+                             (.-bodySmall tthm)
+                             (theme/faded-text-style brightness)))
+    .focusNode focus-node
+    .controller caption-tc)))
+
+(defn swap-page [pc i]
+  (.animateToPage pc i
+                  .duration (Duration .milliseconds 300)
+                  .curve m/Curves.easeInOut))
+
+(defn width-slider [stroke-width *sw ctx controller selected-color]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+
+    :watch [sw (atom stroke-width) :as *sww]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Set stroke width"
+               .style (.-titleLarge tthm))
+       (m/SizedBox .height 12)
+       (m/Text (str (string/join (take 3 (str sw))))
+               .style (.-titleMedium tthm))
+       (m/SizedBox
+        .width 200
+        .child (m/Slider
+                .value sw
+                .onChanged (fn [v]
+                             (reset! *sw v)
+                             (reset! *sww v)
+                             (set! (-> controller fpe/PainterControllerHelper .-freeStyleStrokeWidth) v)
+
+                             (when (-> controller fpe/PainterControllerHelper .-shapeFactory)
+                               (set! (-> controller fpe/PainterControllerHelper .-shapeSettings)
+                                     (fpp/ShapeSettings
+                                      .factory (fpp/LineFactory)
+                                      .paint
+                                      (doto (ui/Paint)
+                                        (.-color! selected-color)
+                                        (.-strokeWidth! v)
+                                        (.-style! ui/PaintingStyle.stroke))
+                                      .drawOnce false)))
+                             nil)
+                .min 0.5
+                .max 10))])
+     .actions [(m/TextButton
+                .child (m/Text "Cancel")
+                .onPressed (fn []
+                             (reset! *sw stroke-width)
+                             (.pop navigator)))
+               (m/TextButton
+                .child (m/Text "Ok")
+                .onPressed (fn []
+                             (.pop navigator)))]))))
+
+(defn color-popup [controller stroke-width *selected-color]
+  (f/widget
+   :managed [kg (m/GlobalKey) :dispose nil]
+   (m/PopupMenuButton
+    .key kg
+    .tooltip "Select color"
+    .child (drawing-icon "Color" (m/Icon m/Icons.palette_outlined
+                                         .color @*selected-color)
+                         (fn []
+                           (.showButtonMenu (.-currentState kg))) nil)
+    .onSelected (fn [color]
+                  (reset! *selected-color color)
+                  ;;without this check, this setter will also enable line draw mode
+                  (when (-> controller fpe/PainterControllerHelper .-shapeFactory)
+                    (set! (-> controller fpe/PainterControllerHelper .-shapeSettings)
+                          (fpp/ShapeSettings
+                           .factory (-> controller fpe/PainterControllerHelper .-shapeFactory)
+                           .paint
+                           (doto (ui/Paint)
+                             (.-color! color)
+                             (.-strokeWidth! stroke-width)
+                             (.-style! ui/PaintingStyle.stroke))
+                           .drawOnce false)))
+
+                  (when (= fpp/FreeStyleMode.erase
+                           (-> controller fpe/PainterControllerHelper .-freeStyleMode))
+                    (set! (-> controller fpe/PainterControllerHelper .-freeStyleMode)
+                          fpp/FreeStyleMode.draw))
+
+                  (set! (-> controller fpe/PainterControllerHelper .-freeStyleColor) color))
+    .itemBuilder
+    (fn [_]
+      #dart ^m/PopupMenuEntry
+       [(m/PopupMenuItem
+         .value m/Colors.white
+         .child (color-circle m/Colors.white))
+
+        (m/PopupMenuItem
+         .value m/Colors.black
+         .child (color-circle m/Colors.black))
+        (m/PopupMenuItem
+         .value m/Colors.red
+         .child (color-circle m/Colors.red))
+        (m/PopupMenuItem
+         .value m/Colors.blue
+         .child (color-circle m/Colors.blue))
+        (m/PopupMenuItem
+         .value m/Colors.green
+         .child (color-circle m/Colors.green))
+        (m/PopupMenuItem
+         .value m/Colors.yellow
+         .child (color-circle m/Colors.yellow))]))))
+
+(defn upload [old-url section-id file  ^m/ScaffoldMessengerState scaffold-messenger]
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media2/"
+                                            uid
+                                            "/"
+                                            section-id))]
+
+    (let [ref (.child folder-ref
+                      (str "/" (basename (.-path file))))]
+      (await (.putData ref (await (.readAsBytes file)))))
+    (let [url (await (let [ref (.child
+                                folder-ref
+                                (str "/"
+                                     (.-name file)))]
+                       (.getDownloadURL ref)))
+
+          url-name {"url" url
+                    "name"  (.-name file)}]
+
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      (-> m (update-in
+                             [:sections section-id "content" "url-names"]
+                             (fn [uns]
+                               (conj uns url-name)))
+                          (update-in
+                           [:sections section-id "content" "captions"]
+                           (fn [captions]
+                             (assoc (or captions {}) url (captions old-url))))))]))))
+
+(defn replace [url-to-replace section-id xfile]
+
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media2/"
+                                            uid
+                                            "/"
+                                            section-id))]
+
+    (let [ref (.child folder-ref (str "/" (.-name xfile)))]
+      (await (.putData ref (await (.readAsBytes xfile))))
+
+      (let [new-url (await (.getDownloadURL ref))]
+
+        (rd/dispatch [::model/update-current-note
+                      (fn [m]
+                        (-> m (update-in
+                               [:sections section-id "content" "url-names"]
+                               (fn [uns]
+
+                                 (mapv (fn [{:strs [url name]}]
+                                         {"url" (if (= url url-to-replace)
+                                                  new-url
+                                                  url)
+                                          "name" name})
+                                       uns)))))])))))
+
+(defn controller->png [controller height width]
+  (println "exporting image")
+  (let [size (ui/Size  width  height)
+        image (await (.renderImage controller size))
+        bytes (await (-> image fpe/UiImagePngUint8ListGetter .-pngBytes))]
+
+    (XFile.fromData
+     bytes
+     .mimeType "image/png")))
+
+(defn save [ctx url  section-id image-height image-width controller *dirty?]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :watch [premium? (rd/subscribe [::model/premium?])]
+    :watch [{{:strs [content]} section-id}
+            (rd/subscribe [::model/current-sections])]
+
+    :let [can-save? (or premium? (= "draw" (content "type")))
+          _ (println "can save? " can-save?)]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+
+      (concat
+       [(m/Text "Unsaved changes"
+                .style (.-titleLarge tthm))]
+       (when (not= "draw" (content "type"))
+         [(m/TextButton
+           .child (m/Text (if can-save? "Save new" "Save new (premium only)"))
+           .onPressed (when can-save?
+                        (fn []
+                          
+                          (when (and can-save? @*dirty?)
+                            (let [xfile (await (controller->png
+                                                controller
+                                                image-height
+                                                image-width))
+
+                                  ref (await (upload
+                                              url
+                                              section-id
+                                              xfile
+                                              scaffold-messenger))])
+                            (reset! *dirty? false)
+
+                            (.pop navigator)
+                            nil))))])
+
+       [(m/TextButton
+         .child (m/Text (if (= "draw" (content "type"))
+                          "Save"
+                          (if can-save? "Overwrite original"
+                              "Overwrite original (premium only)")))
+         .onPressed (when (and can-save? @*dirty?)
+                      (fn []
+                        (let [xfile (await (controller->png
+                                            controller
+                                            image-height
+                                            image-width))]
+                          (await (replace
+                                  url
+                                  section-id
+                                  xfile)))
+                        (reset! *dirty? false)
+                        (.pop navigator)
+                        nil)))]
+
+       (when (not can-save?)
+         [(m/TextButton
+           .child (m/Text "Get premium")
+           .onPressed (fn []
+                        (model/paywall scaffold-messenger)))])
+       [(m/TextButton
+         .child (m/Text "Cancel")
+         .onPressed (fn []
+                      (.pop navigator)))]))))))
+
+(defn leave [ctx url  section-id image-height image-width controller]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :watch [premium? (rd/subscribe [::model/premium?])]
+    :watch [{{:strs [content]} section-id}
+            (rd/subscribe [::model/current-sections])]
+
+    :let [can-save? (or premium? (= "draw" (content "type")))]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+
+      (concat
+       [(m/Text "Unsaved changes"
+                .style (.-titleLarge tthm))]
+
+       (when (not= "draw" (content "type"))
+         [(m/TextButton
+           .child (m/Text (if can-save? "Save new" "Save new (premium only)"))
+           .onPressed (when can-save?
+                        (fn []
+                          (when premium?
+                            (let [xfile (await (controller->png
+                                                controller
+                                                image-height
+                                                image-width))
+
+                                  ref (await (upload
+                                              url
+                                              section-id
+                                              xfile
+                                              scaffold-messenger))])
+
+                            (.pop navigator)
+                            (.pop navigator)
+                            nil))))])
+
+       [(m/TextButton
+         .child (m/Text
+                 (if (= "draw" (content "type"))
+                   "Save"
+                   (if premium? "Overwrite original" "Overwrite original (premium only)")))
+         .onPressed (when can-save?
+                      (fn []
+                        (let [xfile (await (controller->png
+                                            controller
+                                            image-height
+                                            image-width))]
+                          (await (replace
+                                  url
+                                  section-id
+                                  xfile)))
+                        (.pop navigator)
+                        (.pop navigator)
+                        nil)))]
+
+       (when (and (not premium?) (not can-save?))
+         [(m/TextButton
+           .child (m/Text "Get premium")
+           .onPressed (fn []
+                        (model/paywall scaffold-messenger)))])
+       [(m/TextButton
+         .child (m/Text "Discard changes")
+         .onPressed (fn []
+                      (.pop navigator)
+                      (.pop navigator)))
+        (m/TextButton
+         .child (m/Text "Cancel")
+         .onPressed (fn []
+                      (.pop navigator)))]))))))
+
+(defn appbar [url name section-id image-height image-width controller *dirty?  dirty?]
+  (m/AppBar
+   .leading
+   (f/widget
+    :context ctx
+    :get [m/Navigator]
+    (m/IconButton
+     .icon
+     (m/Icon m/Icons.arrow_back)
+     .onPressed
+     (fn []
+       (model/unfocus-then-run
+        (if @*dirty?
+          (leave ctx url section-id image-height image-width controller)
+          (.pop navigator))))))
+
+   .actions (concat
+             [(f/widget
+               :context ctx
+               (m/IconButton
+                .icon (m/Icon m/Icons.save)
+                .onPressed (fn []
+                             (save ctx url section-id image-height image-width controller *dirty?))))
+              (f/widget
+               :context ctx
+               (m/IconButton
+                .onPressed
+                (fn []
+                  (let [xfile (await (controller->png controller image-height image-width))]
+                    (await (SharePlus.instance.share
+                              (ShareParams
+                               .files [xfile]
+                               .fileNameOverrides [(or name "disorganized_media.png")])))
+                    nil))
+                .icon (m/Icon m/Icons.share)))
+              (f/widget
+               :padding {:right 12}
+               :get [m/Navigator]
+               :context ctx
+               (m/IconButton
+                .onPressed (fn []
+                             (popup/confirm
+                              ctx
+                              "Really delete image?"
+                              (fn []
+
+                                (rd/dispatch [::model/update-current-note
+                                              (fn [m]
+                                                (update-in m [:sections section-id "content" "url-names"]
+                                                           (fn [url-names]
+                                                             (into []
+                                                                   (filter
+                                                                    (fn [img]
+                                                                      (not= url (img "url")))
+                                                                    url-names)))))])
+                                (.pop navigator))))
+                .icon (m/Icon m/Icons.delete)))])))
+
+(defn show-colorpicker [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :managed [*color (atom nil) :dispose nil]
+    (m/AlertDialog
+     .title
+     (m/Text "Select color")
+     .content
+     (cp/HueRingPicker
+      .pickerColor (m/Color 0xff443a49)
+      .onColorChanged (fn [c]
+                        (reset! *color c)))
+     .actions
+     (concat
+      [(m/TextButton
+        .onPressed #(.pop navigator)
+        .child (m/Text "Cancel"))]
+
+      [(f/widget
+        (m/TextButton
+         .onPressed
+         (fn []
+           (if-let [^m/Color c @*color]
+             (.pop navigator c)
+             (.pop navigator)))
+         .child (m/Text "Apply")))])))))
+
+(defn url->ui-img [url]
+  (let [img
+        (await (-> (CachedNetworkImageProvider url) fpe/ImageProviderUiImageGetter .-image))]
+    img))
+
+(defn calculate-image-size [image media-query premium?]
+  (let [screen-width (.-width (.-size media-query))
+        screen-height (.-height (.-size media-query))
+        img-width (.-width image)
+        img-height (.-height image)
+        width-ratio (/ (- screen-width 50) img-width)
+        height-ratio (/ (- screen-height 300) img-height)
+        scale (min width-ratio height-ratio 1)]
+    (println "height ratio " height-ratio)
+    {:width (* img-width scale)
+     :height (* img-height scale)}))
+
+(defn color-circle [color]
+  (m/Material
+   .shape (m/CircleBorder)
+   .elevation 2
+   .child (m/Container
+           .width 40
+           .height 40
+           .decoration
+           (m/BoxDecoration
+            .color color
+            .shape m/BoxShape.circle
+            .border (m/Border.all
+                     .color (if (= m/Colors.black color)
+                              m/Colors.white
+                              m/Colors.black)
+                     .width 2))
+           .child (m/Text ""))))
+
+;;example code https://github.com/omarhurani/flutter_painter/blob/master/example/lib/main.dart
+(def ^m/Widget image-painter
+  (f/build
+   [^go_router/GoRouterState state]
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/MediaQuery]
+   :get {{cs .-colorScheme} m/Theme}
+   :context ctx
+   :let [url (-> state .-extra :url)
+         name (str (or (-> state .-extra :name) "drawing"))
+         section-id (-> state .-extra :section-id)]
+   :watch [image (url->ui-img url)]
+
+   :watch [{{:strs [content grid-interval]} section-id}
+           (rd/subscribe [::model/current-sections])]
+   :watch [grid-interval
+           (atom grid-interval)
+           :as *grid-interval
+           :refresh-on grid-interval]
+
+   (if (not image)
+     (m/Scaffold
+      .appBar (m/AppBar)
+      .body (m/Text "loading"))
+
+     (f/widget
+      :watch [premium? (rd/subscribe [::model/premium?])]
+      :get [m/ScaffoldMessenger]
+      :managed [controller (fp/PainterController
+                            .settings (fpp/PainterSettings
+                                       .freeStyle (fpp/FreeStyleSettings
+                                                   .mode fpp/FreeStyleMode.draw
+                                                   .color m/Colors.black
+                                                   .strokeWidth 3))
+                            .background (fpp/ImageBackgroundDrawable
+                                         .image image))
+                {:keys [width height]} (calculate-image-size image media-query premium?) :dispose nil :refresh-on image
+
+                _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                       (fn [_]
+
+                         (when (and
+                                content
+                                (not premium?)
+                                    (not= "draw" (content "type")))
+
+                           (.showSnackBar scaffold-messenger
+                                          (m/SnackBar .content (m/Text "Subscribe to save drawings!")
+
+                                                      .action (m/SnackBarAction
+                                                               .label "Subscribe"
+                                                               .onPressed (fn []
+                                                                            (model/paywall scaffold-messenger)
+                                                                            nil))))
+                           nil)))
+
+                      nil) :dispose nil]
+
+      :watch [stroke-width (atom
+                            (-> controller fpe/PainterControllerHelper .-freeStyleStrokeWidth))
+              :as *sw
+              selected-color (atom m/Colors.black) :as *sc
+              dirty? (atom false) :as *dirty?]
+      (m/Scaffold
+
+       .body
+       (m/SafeArea
+        .child
+        (m/Column
+         .mainAxisSize m/MainAxisSize.max
+         .children
+         (concat
+          [(appbar  url name section-id (.-height image) (.-width image) controller *dirty?
+                    dirty?)
+           (image-textfield section-id url)
+           (m/Center
+            .child (f/widget
+                    :padding {:top 12}
+                    :color m/Colors.grey
+                    (m/SizedBox
+                     .width width
+                     .height height
+                     .child  (if (and grid-interval (> grid-interval 0))
+                               (m/GridPaper
+                                .interval grid-interval
+                                .subdivisions 1
+                                .color (.-tertiary cs)
+                                .child (fp/FlutterPainter
+                                        .onDrawableCreated
+                                        (fn [_]
+                                          (reset! *dirty? true))
+                                        .controller controller))
+
+                               (fp/FlutterPainter
+                                .onDrawableCreated
+                                (fn [_]
+                                  (reset! *dirty? true))
+                                .controller controller)))))
+
+           (m/Spacer)]
+
+          [(m/Row
+            .mainAxisAlignment m/MainAxisAlignment.center
+            .children [(m/IconButton
+                        .onPressed (fn []
+                                     (.undo controller)
+                                     nil)
+                        .icon (m/Icon m/Icons.undo))
+                       (m/IconButton
+                        .onPressed (fn []
+                                     (.redo controller)
+                                     nil)
+                        .icon (m/Icon m/Icons.redo))])
+           (f/widget
+            :watch [selected-button (atom nil) :as *selected]
+            (m/SizedBox
+             .height 55
+             .child
+             (m/SingleChildScrollView
+              .scrollDirection m/Axis.horizontal
+              .child
+              (m/Row
+               .children
+               [(m/SizedBox .width 12)
+                (drawing-icon
+                 "Draw"
+                 (m/Icon m/Icons.draw)
+                 (fn []
+                   (reset! *selected "Draw")
+                   (set! (-> controller fpe/PainterControllerHelper .-freeStyleMode)
+                         fpp/FreeStyleMode.draw)
+                   (set! (-> controller fpe/PainterControllerHelper .-shapeSettings)
+                         (fpp/ShapeSettings
+                          .factory nil))
+                   nil)
+                 selected-button)
+                (m/SizedBox .width 12)
+                (drawing-icon
+                 "Line"
+                 (m/Icon m/Icons.horizontal_rule_rounded)
+                 (fn []
+                   (reset! *selected "Line")
+                   (set! (-> controller fpe/PainterControllerHelper .-shapeSettings)
+                         (fpp/ShapeSettings
+                          .factory (fpp/LineFactory)
+                          .paint
+                          (doto (ui/Paint)
+                            (.-color! selected-color)
+                            (.-strokeWidth! stroke-width)
+                            (.-style! ui/PaintingStyle.stroke))
+                          .drawOnce false))
+                   nil)
+                 selected-button)
+                (m/SizedBox .width 12)
+                (drawing-icon
+                 "Rectangle"
+                 (m/Icon m/Icons.square_outlined)
+                 (fn []
+                   (reset! *selected "Rectangle")
+                   (set! (-> controller fpe/PainterControllerHelper .-shapeSettings)
+                         (fpp/ShapeSettings
+                          .factory (fpp/RectangleFactory)
+                          .paint
+                          (doto (ui/Paint)
+                            (.-color! selected-color)
+                            (.-strokeWidth! stroke-width)
+                            (.-style! ui/PaintingStyle.stroke))
+                          .drawOnce false))
+                   nil)
+                 selected-button)
+                (m/SizedBox .width 12)
+                (f/widget
+                 :get {{cs .-colorScheme} m/Theme}
+
+                 (drawing-icon
+                  "Erase"
+                  (m/Icon m/Icons.cleaning_services)
+                  (fn []
+                    (reset! *selected "Erase")
+                    (set!
+                     (-> controller
+                         fpe/PainterControllerHelper .-shapeSettings)
+
+                     (fpp/ShapeSettings
+                      .factory nil))
+
+                    (set!
+                     (-> controller fpe/PainterControllerHelper .-freeStyleMode)
+                     fpp/FreeStyleMode.erase)
+
+                    nil)
+                  selected-button))
+                (m/SizedBox .width 12)
+                (color-popup controller stroke-width *sc)
+                (m/SizedBox .width 12)
+                (f/widget
+                 :context ctx
+                 (drawing-icon
+                  (str "Width: " (string/join (take 3 (str stroke-width))))
+                  (m/Icon m/Icons.line_weight)
+                  (fn []
+                    (width-slider stroke-width *sw ctx controller selected-color))
+                  selected-button))
+
+                (m/SizedBox .width 12)
+
+                (drawing-icon
+                 (str "Grid: " (if (or (nil? grid-interval) (= 0 grid-interval))
+                                 "Disabled"
+                                 (string/join (take 3 (str grid-interval)))))
+                 (m/Icon m/Icons.grid_view)
+                 (fn []
+                   (set-grid-interval ctx *grid-interval grid-interval  premium? section-id))
+                 selected-button)
+                (m/SizedBox .width 12)]))))]))))))))
+
+(defn image-popup [ctx url name section-id nested?]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :watch [premium? (rd/subscribe [::model/premium?])]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .children
+      [(m/TextButton
+        .onPressed
+        (fn []
+          (.pop navigator)
+          (.pop navigator)
+          (-> ctx go_router/GoRouterHelper
+              (.pushNamed "image-painter"
+                          .extra {:url url
+                                  :name name
+                                  :section-id section-id}))
+          nil)
+        .child (m/Text (if premium? "Draw on image" "Draw on image (premium)")))
+
+       (m/TextButton
+        .onPressed
+        (fn []
+          (let [response (await (http/get (Uri.parse url)))
+                bytes (.-bodyBytes response)
+                xfile (XFile.fromData bytes
+                                      .mimeType (lookupMimeType name))]
+            (await (SharePlus.instance.share
+                    (ShareParams
+                     .files [xfile]
+                     .fileNameOverrides [name])))
+            (.pop navigator)
+            nil))
+        .child (m/Text "Share"))
+
+       (m/TextButton
+        .onPressed (fn []
+                     (rd/dispatch [::model/update-current-note
+                                   (fn [m]
+                                     (update-in m [:sections section-id "content" "url-names"]
+                                                (fn [url-names]
+                                                  (into []
+                                                        (filter
+                                                         (fn [img]
+                                                           (not= url (img "url")))
+                                                         url-names)))))])
+                     (.pop navigator :deleted))
+        .child (m/Text "Delete"))])
+     .actions [(popup/cancel)]))))
+
+(defn carousel2 [url-names note {:keys [captions section-id]}]
+  (f/widget
+   :context ctx
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])
+           prefs (rd/subscribe [::model/prefs])]
+   (m/Theme
+    .data (theme/customized-theme "dark" prefs))
+   (f/widget
+    :context ctx
+    :managed [pc (m/PageController)]
+    :watch [brightness (rd/subscribe [::model/get-brightness])]
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/Scaffold
+     .appBar (m/AppBar
+              .title (m/Text (if kIsWeb
+                               "Scroll down for next image"
+                               "Swipe right for next image")
+                             .style (.merge
+                                     (.-bodySmall tthm)
+                                     (theme/faded-text-style m/Brightness.dark))))
+     .body
+     (PhotoViewGallery.builder
+      .onPageChanged (fn [index]
+                       (println "changed page"))
+      .wantKeepAlive true
+      .scrollDirection (if kIsWeb m/Axis.vertical m/Axis.horizontal)
+      .pageSnapping (not kIsWeb)
+      .pageController pc
+      .itemCount (count url-names)
+      .builder (fn [_ i]
+                 (let [{:strs [url name]} (nth url-names i)]
+                   (PhotoViewGalleryPageOptions.customChild
+                    .onTapDown (fn [_ _ _]
+                                 (when (= :deleted
+                                          (await (image-popup ctx url name section-id true)))
+                                   (cond
+                                     (= 0 i)
+                                     (swap-page pc 1)
+
+                                     (> (dec (count url-names)) i)
+                                     (swap-page pc (inc i))
+                                     :else (.pop navigator))))
+                    .child
+                    (m/Column
+                     .spacing 12
+                     .mainAxisSize m/MainAxisSize.min
+                     .children
+                     [(f/widget
+                       :managed [caption-tc (m/TextEditingController)]
+
+                       :get {{tthm .-textTheme} m/Theme}
+                       :watch [brightness (rd/subscribe [::model/get-brightness])]
+                       :padding {:horizontal 20
+                                 :top 40}
+                       :managed [focus-node (m/FocusNode)
+                                 _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                                        (fn [_]
+                                          (.-text! caption-tc
+                                                   (str (get-in content
+                                                                ["captions" url])))
+                                          nil))
+                                       nil) :dispose nil]
+
+                       :bg-watcher ([focused? focus-node :> .-hasFocus]
+                                    (when-not focused?
+                                      (rd/dispatch [::model/update-current-note
+                                                    (fn [m]
+                                                      (update-in
+                                                       m
+                                                       [:sections section-id
+                                                        "content" "captions"]
+                                                       (fn [captions]
+                                                         (assoc
+                                                          (or captions {})
+                                                          url
+                                                          (.-text caption-tc)))))])))
+
+                       (m/TextField
+                        .textCapitalization m/TextCapitalization.sentences
+                        .controller caption-tc
+                        .style (.-bodyLarge tthm)
+                        .focusNode focus-node
+                        .maxLines nil
+                        .autocorrect true
+                        .decoration (m/InputDecoration
+                                     .hintText "Caption ")))
+                      (CachedNetworkImage
+                       .imageUrl url
+                       .placeholder (fn [_ _]
+                                      (m/SizedBox
+                                       .height 50
+                                       .width 50
+                                       .child (m/Center
+                                               .child (m/CircularProgressIndicator))))
+                       .errorWidget (fn [_ _ error]
+                                      (m/Icon m/Icons.error))
+                       .height 600
+                       .width 500
+                       .fit (m/BoxFit.contain))])))))))))
+

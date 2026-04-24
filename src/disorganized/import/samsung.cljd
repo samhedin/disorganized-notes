@@ -1,0 +1,178 @@
+(ns disorganized.import.samsung
+  (:require [cljd.flutter :as f]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference]]
+            
+            [clojure.string :as string]
+            [disorganized.model :as model]
+            ["package:flutter/material.dart" :as m]
+            [hti.re-dash.alpha :as rd]
+            ["package:file_picker/file_picker.dart" :refer [FilePicker FileType]]))
+
+(defn upload-pdfs [note section-id type files folder-id scaffold-messenger]
+  (println "uploading " folder-id)
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media/"
+                                            uid
+                                            "/"
+                                            folder-id))]
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar
+                    .content (m/Text (str "Uploading, stand by..."))))
+
+    
+    (doseq [file files
+            :let [ref (.child folder-ref
+                              (str "/" (.-name file)))]]
+      
+      (await (.putData ref (await (.readAsBytes file)))))
+    
+    (assoc-in note [:sections section-id "content"]
+              {"id" folder-id
+               "type" type})))
+
+(defn samsung->note [text]
+  (let [combined #"\[(v|\s\s)\]\s+(.*)"
+        items (reduce (fn [acc [_ state item]]
+                        (if (= state "v")
+                          (update acc :checked conj item)
+                          (update acc :unchecked conj item)))
+                      {:checked [] :unchecked []}
+                      (re-seq combined text))
+
+        list-section (-> (model/default-section-map "list" 0 "list")
+                         (assoc "content"
+                                (mapv (fn [item]
+                                        {"id" (str (random-uuid))
+                                         "children" []
+                                         "data" item})
+                                      (:unchecked items)))
+
+                         (assoc "checked-content"
+                                (mapv (fn [item]
+                                        {"id" (str (random-uuid))
+                                         "children" []
+                                         "data" item})
+                                      (:checked items))))
+
+        note (if (seq items)
+               (-> (model/init-new-note)
+                   (assoc :plaintext text)
+                   (assoc :sections {(list-section "id")
+                                     list-section}))
+
+               (assoc (model/init-new-note) :plaintext text))]
+
+    (await (model/import-note note))))
+
+(defn pick-pdf [scaffold-messenger]
+  (when-let [result (await (FilePicker.platform.pickFiles
+                       .type FileType.custom
+                       .allowMultiple true
+                       .allowedExtensions ["pdf"]))]
+    
+    (let [media-section (model/default-section-map "media" 0 "media")
+          files (into [] (.-xFiles result))
+          note (-> (model/init-new-note)
+                   (assoc :plaintext "Samsung pdf import"
+                          :sections {(media-section "id")
+                                     media-section}))
+           
+          note' (await (upload-pdfs note (media-section "id") "other" files (str (random-uuid)) scaffold-messenger))]
+
+      (await (model/import-note note')))
+
+    (rd/dispatch [::model/refresh-notes])))
+
+(defn pick-files []
+  (when-let [result (await (FilePicker.platform.pickFiles
+                            .type FileType.custom
+                            .allowMultiple true
+                            .allowedExtensions ["txt"]))]
+    (let [files (into [] (.-xFiles result))
+          strings (await (Future.wait (mapv #(.readAsString %) files)))]
+      (doseq [s strings]
+        (await (samsung->note s))))
+    (rd/dispatch [::model/refresh-notes])))
+
+(defn samsung2 [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Samsung Notes import, 2/2"
+               .style (.-titleMedium tthm))
+
+       (m/Text "PDF file import
+
+1. Open Samsung Notes
+2. Long press on any note.
+3. In the top left, select All.
+4. In the bot right, click More
+5. Select Save as file
+6. Save as PDF
+7. Save all notes to the device.
+
+Then, import all notes by clicking the button below.")])
+
+     .actions [(m/TextButton
+                .child (m/Text "Don't import PDF")
+                .onPressed (fn []
+                             (.pop navigator)))
+               (f/widget
+                :get [m/ScaffoldMessenger]
+                (m/TextButton
+                 .child (m/Text "Select files")
+                 .onPressed
+                 (fn []
+                   (await (pick-pdf scaffold-messenger))
+                   (.pop navigator)
+                   nil)))]))))
+
+(defn samsung [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Samsung Notes import, 1/2"
+               .style (.-titleMedium tthm))
+
+       (m/Text "First import text files, then PDF.
+
+1. Open Samsung Notes
+2. Long press on any note.
+3. In the top left, select All.
+4. In the bot right, click More
+5. Select Save as file
+6. Save note as Text file
+7. Save all notes to the device.
+
+Then, import all notes by clicking the button below.")])
+
+     .actions [(m/TextButton
+                .child (m/Text "Don't import text")
+                .onPressed (fn []
+                             (.pop navigator)))
+               (m/TextButton
+                .child (m/Text "Select files")
+                .onPressed
+                (fn []
+                  (await (pick-files))
+                  (.pop navigator)
+                  (await (samsung2 ctx))
+                  nil))]))))
+

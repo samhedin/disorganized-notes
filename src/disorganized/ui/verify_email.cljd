@@ -1,0 +1,87 @@
+(ns disorganized.ui.verify-email
+  (:require
+   [cljd.flutter :as f]
+   [disorganized.model :as model]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["package:flutter/material.dart" :as m]
+   ["dart:async" :refer [Timer]]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:firebase_auth/firebase_auth.dart" :as firebase-auth :refer [FirebaseAuth User]]))
+
+(defn- send-verification-email [user]
+  (await (.sendEmailVerification user))
+  (Timer.periodic (Duration .seconds 5)
+                  (fn [timer]
+                    (println "triggering timer")
+                    (let [user (.-currentUser FirebaseAuth.instance)]
+                      (when user
+                        (await (.reload user)))
+                      
+                      (when (and user (.-emailVerified user))
+                        (.cancel timer)))
+                    
+                    nil)))
+
+(def ^m/Widget verify-email
+  (f/build
+   [^go_router/GoRouterState router-state]
+   :let [user (-> FirebaseAuth .-instance .-currentUser)]
+   :get [m/Navigator m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [{verified? .-emailVerified} (.userChanges FirebaseAuth.instance)]
+   :managed [_ (do
+                 (m/WidgetsBinding.instance.endOfFrame.then
+                  (fn [_]
+                    (when (not kIsWeb)
+                      (FirebaseCrashlytics.instance.setCustomKey "opening-page" "verify-email"))
+                    (await (send-verification-email user))))
+                 nil) :dispose nil]
+
+   (m/Scaffold
+    .appBar (m/AppBar)
+    .body
+    (f/widget
+     :padding {:horizontal 20}
+     :get {{tthm .-textTheme} m/Theme}
+     :watch [{uid .-uid
+              email .-email}
+             (.authStateChanges FirebaseAuth.instance)]
+     
+     (m/AnimatedCrossFade
+      .duration (Duration .milliseconds 300)
+      .crossFadeState (if verified?
+                        m/CrossFadeState.showFirst
+                        m/CrossFadeState.showSecond)
+      
+      .firstChild (f/widget
+                   :padding {:top 50}
+                   m/Center
+                   (m/Column
+                    .crossAxisAlignment m/CrossAxisAlignment.center
+                    .children
+                    [(m/Text "Email verified!"
+                             .style (.-titleLarge tthm))
+                     (m/Text "You can go back now")]))
+      
+      .secondChild (m/Column
+                    .mainAxisAlignment m/MainAxisAlignment.center
+                    .crossAxisAlignment m/CrossAxisAlignment.center
+                    .children
+                    [(m/Text "Validation email sent!"
+                             .style (.-titleLarge tthm))
+                     (m/SizedBox .height 30)
+                     (m/Text (str "Check inbox of " email)
+                             .style (.-bodyLarge tthm))
+                     
+                     (m/Text "If no email found, check spam inbox"
+                             .style (.-bodyLarge tthm))
+                     (m/SizedBox .height 30)
+                     (m/Row
+                      .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+                      .children [(m/ElevatedButton
+                                  .onPressed (fn []
+                                               (await (send-verification-email user))
+                                               (model/snackbar scaffold-messenger "New email sent!")
+                                               nil)
+                                  .child (m/Text "Re-send email"))])]))))))

@@ -1,0 +1,467 @@
+(ns disorganized.ui.timer
+  (:require
+   ["package:pulsator/pulsator.dart" :as pulsator]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["package:circular_countdown_timer/circular_countdown_timer.dart" :as ct]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:alarm/alarm.dart" :as alarm]
+   ["dart:convert" :as c]
+   ["dart:io" :refer [Platform]]
+   ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+   ["package:shared_preferences/shared_preferences.dart" :as sp]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["package:carousel_slider/carousel_slider.dart" :refer [CarouselSlider CarouselOptions]]
+   ["package:disorganized_notes/IndentableListItem.dart" :refer [IndentableListItem]]
+   ["package:flutter/services.dart" :as svc]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.set :refer [union]]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:flutter/material.dart" :as m]
+   [cljd.flutter :as f]))
+
+(def max-height 200)
+
+(defn seconds->duration [seconds]
+  (let [hours (quot seconds 3600)
+        minutes (quot (mod seconds 3600) 60)
+        remaining-seconds (mod seconds 60)]
+    {:seconds remaining-seconds
+     :minutes minutes
+     :hours hours}))
+
+(defn update [section-id v key]
+  (rd/dispatch [::model/update-current-note
+                (fn [m]
+                  (assoc-in
+                   m
+                   [:sections section-id "content" key]
+                   v))]))
+
+(defn pageview-picker [content section-id key max-val *keyboard?]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :let [selected (or (content key) 0)]
+   :width 120
+   :key (content key)
+   (CarouselSlider
+    .options (CarouselOptions
+              .onPageChanged (fn [x reason] (update section-id x key))
+              .enlargeCenterPage true
+              .enlargeFactor 0.35
+              .initialPage selected
+              .viewportFraction 0.35
+              .height 50
+              ;;If the scrollDirection is vertical it steals scrolling
+              ;;when flipping through a note which is frustrating.
+              .scrollDirection m/Axis.horizontal)
+
+    .items
+    (map-indexed
+     (fn [i x]
+       (f/widget
+        :key (str content i selected key)
+        m/Center
+        (m/InkWell
+         .child (m/Text (str i)
+                        .style (if (= i selected)
+                                 (.-titleLarge tthm)
+                                 (.-titleSmall tthm)))
+         .onTap
+         (fn []
+           (reset! *keyboard? key)))))
+     (range max-val)))))
+
+(defn pageview-text-input [content section-id key max-val *keyboard?]
+  (f/widget
+   :padding {:horizontal 12}
+
+   :managed [focus-node (m/FocusNode)
+             ;;https://github.com/flutter/flutter/issues/88833#issuecomment-906301512
+             tc (m/TextEditingController)]
+
+   :bg-watcher ([{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+                (.-text! tc (str (content key))))
+
+   :bg-watcher ([focused? focus-node :> .-hasFocus]
+
+                (let [n (try (int/parse (.-text tc))
+                             (catch FormatException e
+                               nil))]
+
+                  (when (and n
+                             (not focused?)
+                             (> max-val n)
+                             (>= n 0))
+                    (rd/dispatch [::model/update-current-note
+                                  (fn [m]
+                                    (assoc-in m
+                                              [:sections section-id "content" key]
+                                              n))]))
+                  (when focused?
+                    (.-selection! tc
+                                  (m/TextSelection
+                                   .baseOffset 0
+                                   .extentOffset (count (.-text tc)))))))
+
+   :get {{tthm .-textTheme} m/Theme}
+
+   :managed [_  (do (m/WidgetsBinding.instance.addPostFrameCallback
+                     (fn [_]
+                       (when (= @*keyboard? key)
+                         (.requestFocus focus-node))
+
+                       (when (string/blank? (.-text tc))
+                         (.-text! tc (or (str (content key)) (str 0))))
+
+                       nil))
+                    nil) :dispose nil]
+
+   (m/ConstrainedBox
+    .constraints (m/BoxConstraints
+                  .maxHeight 50
+                  .minHeight 50
+                  .maxWidth 30))
+   (m/TextField
+    .style (.-titleLarge tthm)
+    .textAlign m/TextAlign.center
+    .keyboardType m/TextInputType.number
+    .onTap (fn []
+             (.-selection! tc
+                           (m/TextSelection
+                            .baseOffset 0
+                            .extentOffset (count (.-text tc))))
+             nil)
+    .focusNode focus-node
+    .controller tc
+    .onSubmitted (fn [_] (reset! *keyboard? false))
+    .autofocus (= @*keyboard? key)
+    .onTapOutside (fn [_] (reset! *keyboard? false)))))
+
+(defn timer-warning [scaffold-messenger]
+  (model/snackbar scaffold-messenger "Timer has to be above 0"))
+
+(defn picker [content section-id key max-val *keyboard?]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/ScaffoldMessenger]
+   :padding {:vertical 8
+             :left 4}
+   m/Row
+   .children
+   [(m/SizedBox
+     .width 80
+     .child
+     (m/Text (string/capitalize (str key)) .style (.-titleMedium tthm)))
+
+    (m/SizedBox .width 10)
+    (m/TextButton
+     .onPressed (fn []
+                  (case key
+                    "hours" (if (> (- (content "hours") 1) 0)
+                              (rd/dispatch [::model/update-current-note
+                                            (fn [m]
+                                              (assoc-in m
+                                                        [:sections section-id "content" key]
+                                                        (- (content "hours") 1)))])
+                              (timer-warning scaffold-messenger))
+
+                    "minutes" (rd/dispatch [::model/update-current-note
+                                            (fn [m]
+                                              (let [total-minutes (+ (* (content "hours") 60) (content "minutes"))
+                                                    new-total (- total-minutes 5)]
+                                                (if (< new-total 0)
+                                                  (do (timer-warning scaffold-messenger)
+                                                      m)
+                                                  (-> m
+                                                      (assoc-in [:sections section-id "content" "hours"]
+                                                                (quot new-total 60))
+                                                      (assoc-in [:sections section-id "content" "minutes"]
+                                                                (mod new-total 60))))))])
+
+                    "seconds" (rd/dispatch [::model/update-current-note
+                                            (fn [m]
+                                              (let [total-seconds (+ (* (content "hours") 3600)
+                                                                     (* (content "minutes") 60)
+                                                                     (content "seconds"))
+                                                    new-total (- total-seconds 10)]
+                                                (if (< new-total 0)
+                                                  (do (timer-warning scaffold-messenger)
+                                                      m)
+                                                  (-> m
+                                                      (assoc-in [:sections section-id "content" "hours"]
+                                                                (quot new-total 3600))
+                                                      (assoc-in [:sections section-id "content" "minutes"]
+                                                                (mod (quot new-total 60) 60))
+                                                      (assoc-in [:sections section-id "content" "seconds"]
+                                                                (mod new-total 60))))))]))
+                  nil)
+     .child
+     (m/Text (case key
+               "hours" "-1"
+               "minutes" "-5"
+               "seconds" "-10")))
+    
+    (pageview-text-input content section-id key max-val *keyboard?)
+
+    (m/TextButton
+     .onPressed (fn []
+                  (case key
+                    "hours" (rd/dispatch [::model/update-current-note
+                                          (fn [m]
+                                            (assoc-in m
+                                                      [:sections section-id "content" key]
+                                                      (inc (content "hours"))))])
+
+                    "minutes" (rd/dispatch [::model/update-current-note
+                                            (fn [m]
+                                              (let [new-total (+ (content "minutes") 5)
+                                                    hours-to-add (quot new-total 60)
+                                                    remaining-mins (mod new-total 60)]
+                                                (-> m
+                                                    (assoc-in [:sections section-id "content" "hours"]
+                                                              (+ (content "hours") hours-to-add))
+                                                    (assoc-in [:sections section-id "content" "minutes"]
+                                                              remaining-mins))))])
+
+                    "seconds" (rd/dispatch [::model/update-current-note
+                                            (fn [m]
+                                              (let [total-seconds (+ (content "seconds") 10)
+                                                    total-minutes (+ (content "minutes") (quot total-seconds 60))
+                                                    total-hours (+ (content "hours") (quot total-minutes 60))]
+                                                (-> m
+                                                    (assoc-in [:sections section-id "content" "hours"]
+                                                              total-hours)
+                                                    (assoc-in [:sections section-id "content" "minutes"]
+                                                              (mod total-minutes 60))
+                                                    (assoc-in [:sections section-id "content" "seconds"]
+                                                              (mod total-seconds 60)))))]))
+                  nil)
+     .child
+     (m/Text (case key
+               "hours" "+1"
+
+               "minutes" "+5"
+               "seconds" "+10")))]))
+
+(defn textfield [section-id]
+  (f/widget
+   :watch [{{:strs [content description]} section-id} (rd/subscribe [::model/current-sections])]
+
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :padding {:vertical 8}
+   :managed [tc (m/TextEditingController .text description)
+             focus-node (m/FocusNode)]
+   :bg-watcher ([focused? focus-node :> .-hasFocus]
+                (when (not focused?)
+                  (rd/dispatch
+                   [::model/update-current-note
+                    (fn [m]
+                      (assoc-in m [:sections section-id "description"]
+                                (.-text tc)))])))
+   (m/TextField
+    .controller tc
+    .textCapitalization m/TextCapitalization.sentences
+    .maxLines nil
+    .focusNode focus-node
+    .decoration (m/InputDecoration
+                 .hintStyle (.merge
+                             (.-bodySmall tthm)
+                             (theme/faded-text-style brightness))
+                 .hintText "Timer description"))))
+
+(defn schedule-alarm [section-id]
+  (f/widget
+   :watch [{{:strs [content]} section-id}
+           (rd/subscribe [::model/current-sections])
+           keyboard-input? (atom false) :as *keyboard?]
+
+   (m/ConstrainedBox
+    .constraints (m/BoxConstraints
+                  .minHeight max-height
+                  .maxHeight max-height))
+   (m/TapRegion
+    .child (m/Column
+                                        ;            .mainAxisAlignment m/MainAxisAlignment.center
+            .mainAxisSize m/MainAxisSize.min
+            .children
+            [(picker content section-id "hours" 24 *keyboard?)
+             (picker content section-id "minutes" 60 *keyboard?)
+             (picker content section-id "seconds" 60 *keyboard?)])
+
+    .onTapOutside (fn [_]
+                    (model/unfocus-then-run
+                     (reset! *keyboard? false))))))
+
+(defn alarm-running [alarm-id duration section-id]
+  (f/widget
+   :context ctx
+   :get {{cs .-colorScheme} m/Theme}
+   :get [m/MediaQuery]
+   :watch [{:flds [alarms]} (.scheduled alarm/Alarm)]
+   :let [alarm (first (filter #(= alarm-id
+                                  (.-id %))
+                              (into #{} alarms)))]
+
+   ;;This is needed because otherwise the countdown timer goes out of sync
+   ;;with the schedule when the user e.g turns the screen off/on again.
+
+   (m/ConstrainedBox
+    .constraints (m/BoxConstraints
+                  .minHeight max-height
+                  .maxHeight max-height)
+
+    .child (m/AnimatedSwitcher
+            .duration (Duration .milliseconds 300)
+            .child
+            (if alarm
+              (f/widget
+               :watch [refresh? (atom nil) :as *refresh?]
+               :watch [brightness (rd/subscribe [::model/get-brightness])]
+               :watch [prefs (rd/subscribe [::model/prefs])]
+
+               :let [color (if (= m/Brightness.dark brightness)
+                             (theme/fab-color prefs "dark")
+                             (theme/fab-color prefs "light"))]
+               :let [duration-until-alarm
+                     (.difference
+                      (.-dateTime alarm)
+                      (DateTime.now))
+
+                     progress (. duration "-" duration-until-alarm)]
+
+               :key (str refresh?)
+               ;;When the app goes to sleep it stops animating
+               ;;And without the refresh, it continues to animate
+               ;;from the point when it was put to sleep.
+               ;;In other words the timer goes out of sync
+               ;;Simply refreshing the widget onResume fixes it.
+               :managed [_ (f_widgets/AppLifecycleListener
+                            .onResume (fn []
+                                        (reset! *refresh? (random-uuid))))]
+               (ct/CircularCountDownTimer
+                .key (m/ValueKey (str progress "countdown"))
+                .duration (.-inSeconds duration)
+                .strokeWidth 8
+                .initialDuration (.-inSeconds progress)
+                .width (/ (-> media-query .-size .-width) 3)
+                .height (/ (->  media-query .-size .-height) 3)
+                .textFormat "HH:mm:ss"
+                .fillColor (.-surface cs)
+
+                .textStyle (m/TextStyle
+                            .color (if (= m/Brightness.dark brightness)
+                                     m/Colors.white
+                                     m/Colors.black))
+                .ringColor color
+                .isReverse true
+                .autoStart true))
+              (m/Text "loading"))))))
+
+(defn show [section-id section]
+  (f/widget
+   :watch [{{:strs [content]} section-id}
+           (rd/subscribe [::model/current-sections])
+           scheduled? (atom false) :as *scheduled?
+           ringing? (atom false) :as *ringing?]
+
+   :let [duration (Duration
+                   .seconds (or (content "seconds") 0)
+                   .minutes (or (content "minutes") 0)
+                   .hours (or (content "hours") 0))]
+   :get {{tthm .-textTheme} m/Theme}
+
+   :let [alarm-id (.hashCode (section "id"))]
+   :padding {:vertical 10}
+
+   :bg-watcher ([{:flds [alarms]} (.scheduled alarm/Alarm)]
+                (let [ids (into #{} (map #(.-id %) (into #{} alarms)))]
+                  (reset! *scheduled? (contains? ids alarm-id))))
+
+   :bg-watcher ([{:flds [alarms]} (.ringing alarm/Alarm)]
+                (let [ids (into #{} (map #(.-id %) (into #{} alarms)))]
+                  (reset! *ringing? (contains? ids alarm-id))))
+
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.stretch
+    .children
+    [(m/AnimatedSwitcher
+      .transitionBuilder (fn [child animation]
+                           (m/SizeTransition
+                            .sizeFactor animation
+                            .axis (m/Axis.horizontal)
+                            .child (m/Align
+                                    .alignment m/Alignment.topCenter
+                                    .child (m/FadeTransition
+                                            .opacity animation
+                                            .child child))))
+      .duration (Duration .milliseconds 500)
+      .child (if scheduled?
+               (f/widget
+                :key (str content)
+                (alarm-running alarm-id  duration section-id))
+               (schedule-alarm section-id)))
+
+     (textfield section-id)
+     (m/SizedBox .height 5)
+     (m/AnimatedSwitcher
+      .duration (Duration .milliseconds 500)
+      .child (cond
+               scheduled?
+               (m/Row
+                .children
+                [(m/Expanded
+                  .child (m/OutlinedButton.icon
+                          .icon (m/Icon m/Icons.timer)
+                          .onPressed
+                          (fn []
+                            (let [stopped? (await (alarm/Alarm.stop alarm-id))]
+                              (println "stopped " stopped?))
+                            nil)
+                          .label (m/Text "Cancel timer")))])
+
+               ringing? (f/widget
+                         :get {{cs .-colorScheme} m/Theme}
+                         (m/ElevatedButton.icon
+                          .style (m/ElevatedButton.styleFrom
+                                  .shape (m/RoundedRectangleBorder
+                                          .borderRadius (m/BorderRadius.circular 15))
+                                  .elevation 3)
+                          .icon (pulsator/PulseIcon
+                                 .icon m/Icons.timer
+                                 .pulseColor (.-onSurface cs)
+                                 .pulseSize 60)
+                          .onPressed
+                          (fn []
+                            (await (alarm/Alarm.stop alarm-id))
+                            (reset! *ringing? false)
+                            nil)
+                          .label (m/Text "Stop alarm")))
+
+               :else (m/Row
+                      .children
+                      [(m/Expanded
+                        .child (m/OutlinedButton.icon
+                                .onPressed
+                                (fn []
+                                  (model/unfocus-then-run
+
+                                     ;;Without .stop the UI goes out of sync if re-running a previous alarm,
+                                        ;because it will auto stop and apparently that screws everything up.
+                                     ;;not sure what's going
+                                   (await (.stop alarm/Alarm alarm-id))
+
+                                   (await (dutils/checkAndroidScheduleExactAlarmPermission))
+                                   (rd/dispatch [::model/schedule-alarm section-id])))
+
+                                .icon (m/Icon m/Icons.timer)
+                                .label (m/Text (if kIsWeb
+                                                 "Timer not supported on web"
+                                                 "Start timer"))))])))])))

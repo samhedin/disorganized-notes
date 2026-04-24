@@ -1,0 +1,256 @@
+(ns disorganized.ui.show-note
+  (:require ["package:flutter/material.dart" :as m]
+            [disorganized.model :as model]
+            
+            [disorganized.ui.media :as media]
+            ["package:path/path.dart" :refer [basename]]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+            [clojure.string :as string]
+            [disorganized.ui.popup :as popup]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            [disorganized.model :as utils]
+            [hti.re-dash.alpha :as rd]
+            [disorganized.ui.theme :as theme]
+            [cljd.flutter :as f]))
+
+(defn show-table [section]
+  (m/DataTable
+   .border (m/TableBorder.symmetric
+            .outside (m/BorderSide.none)
+            .inside (m/BorderSide.none))
+   .dividerThickness 0.00001
+   .columnSpacing 1
+   .horizontalMargin 1
+   .columns (mapv
+             #(m/DataColumn
+               .label (m/SelectableText (str %))) (section "columns"))
+   .rows (for [{:strs [data]} (section "content")]
+           (m/DataRow
+            .cells
+            (for [c (section "columns")
+                  :let [item (data c)]]
+              (m/DataCell
+               (m/SelectableText (str item))))))))
+
+(defn show-list-item [data padding]
+  (f/widget
+   :padding {:left padding}
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :let [faded (theme/faded-text-style brightness)]
+
+   :let [urls (utils/find-urls data)]
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.start
+    .children
+    [(m/SizedBox .height 10)
+     (m/SelectableText (str "- " data))
+     (m/Wrap
+      .children (map #(m/ConstrainedBox
+                       .constraints
+                       (m/BoxConstraints .maxWidth 150)
+                       .child (m/ElevatedButton
+                               .child (m/Text (string/replace % "https://" "")
+                                              .overflow m/TextOverflow.ellipsis
+                                              .style (.merge
+                                                      (.-bodySmall tthm)
+                                                      faded))
+                               .onPressed (fn []
+                                            (url/launch %)
+                                            nil))) urls))])))
+
+(defn show-list [section]
+  (let [checkboxes? (section "checkboxes-visible")]
+    (f/widget
+     :watch [brightness (rd/subscribe [::model/get-brightness])]
+     :let [faded (theme/faded-text-style brightness)]
+
+     (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (flatten
+       (for [item (section "content")
+             :let [children (item "children")
+                   text (item "data")
+                   checked? (item "checkbox")]]
+         (concat
+          [(show-list-item (item "data") 0)]
+          (for [c children]
+            (show-list-item (c "data") 20)))))))))
+
+(defn download-files [folder-id user-id]
+  (let [storage-ref (FirebaseStorage.instance.ref)
+        images-ref (await
+                    (.listAll
+                     (.child storage-ref
+                             (str "/forum/"
+                                  user-id
+                                  "/"
+                                  folder-id))))
+        data (atom [])]
+
+    (doseq [item (.-items images-ref)
+            :let [url (await (.getDownloadURL item))]]
+      (swap! data #(conj % {:url url
+                            :ref item})))
+    @data))
+
+(defn show-images [folder-id user-id]
+  (f/widget
+   :context ctx
+   :watch [file-urls  (download-files folder-id user-id) :default []]
+   :key (count file-urls)
+   (m/Column
+    .children
+    [(m/TextButton
+      .onPressed (fn []
+                   (popup/web-carousel ctx file-urls)
+                   nil)
+      .child
+      (m/ConstrainedBox
+       .constraints (m/BoxConstraints .maxWidth 300
+                                      .maxHeight (cond
+                                                   (empty? file-urls) 0
+                                                   (= 1 (count file-urls)) 300
+                                                   :else (+ 200
+                                                            (* (count file-urls)
+                                                               10))))
+       .child
+       (if (= 1 (count file-urls))
+         (m/Image.network (:url (first file-urls))
+                          .height 500
+                          .width 500
+                          .fit (m/BoxFit.contain))
+         (m/Stack
+          .children
+          (map-indexed (fn [i f]
+                         (f/widget
+                          (m/Positioned
+                           .top (* i 10)
+                           .left (* i 10))
+                          (m/ClipRRect
+                           .borderRadius (m/BorderRadius.circular 15.0))
+                          (m/ConstrainedBox
+                           .constraints (m/BoxConstraints .maxWidth 200
+                                                          .maxHeight 200))
+                          (m/Image.network (:url f)
+                                           .fit (m/BoxFit.contain))))
+                       file-urls)))))])))
+
+(defn show-text [section]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :let [content (section "content")
+         urls (utils/find-urls content)
+         brightness (rd/subscribe [::model/get-brightness])
+         ^m/TextStyle faded (theme/faded-text-style brightness)]
+   m/Column
+   .children
+   [(m/Wrap
+     .children (map #(m/ElevatedButton
+                      .child (m/Text (if (> (count %) 31)
+                                       (str (subs % 0 30) "...")
+                                       %)
+                                     .style (.merge
+                                             (.-bodySmall tthm)
+                                             faded))
+                      .onPressed (fn []
+                                   (url/launch %)
+                                   nil)) urls))
+    (m/SelectableText (str (section "content")))]))
+
+(defn show-reminder [section]
+  (m/SelectableText "<reminder>"))
+
+(defn show-media [section-name section user-id & [local-images?]]
+  
+  (let [folder-id (get-in section ["content" "id"])
+        type (get-in section ["content" "type"])]
+    (if (= "images" type)
+      (if local-images?
+        (media/show-images section-name
+                           folder-id
+                           (get-in section ["content" "captions"]))
+        (show-images folder-id user-id))
+      (m/SelectableText "<Unsupported forum file type>"))))
+
+(defn show-plaintext [plaintext]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :let [urls (utils/find-urls (str plaintext))
+         faded (theme/faded-text-style brightness)]
+   m/Column
+   .children
+   [(m/SelectableText (str plaintext)
+            .style (.-bodyLarge tthm))
+    (m/Wrap
+     .children (map #(m/ConstrainedBox
+                      .constraints
+                      (m/BoxConstraints .maxWidth 150)
+                      .child (m/ElevatedButton
+                              .child (m/Text (string/replace % "https://" "")
+                                             .overflow m/TextOverflow.ellipsis
+                                             .style (.merge
+                                                     (.-bodySmall tthm)
+                                                     faded))
+                              .onPressed (fn []
+                                           (url/launch %)
+                                           nil))) urls))]))
+
+(defn show-table2 [section]
+  (m/DataTable
+   .border (m/TableBorder.symmetric
+            .outside (m/BorderSide.none)
+            .inside (m/BorderSide.none))
+   .headingRowHeight 20
+   .dataRowMinHeight 20
+   .dataRowMaxHeight 25
+
+   .dividerThickness 0.00001
+   .columnSpacing 10
+   .horizontalMargin 1
+   .columns (mapv
+             #(m/DataColumn
+               .label (m/Text (str (% "name"))
+                              .overflow (m/TextOverflow.clip)))
+             (take 3 (section "columns")))
+   .rows (for [{:strs [data]} (take 4 (section "content"))]
+           (m/DataRow
+            .cells
+            (for [c (take 3 (section "columns"))
+                  :let [item (data (c "cid"))]]
+              (m/DataCell
+               (m/Text (str item)
+                       .overflow m/TextOverflow.ellipsis)))))))
+
+(defn show-note [note & [local-images?]]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   (let [sections (sort-by (fn [[_ {:strs [section-position]}]]
+                             section-position)
+                           (:sections note))]
+     (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (concat
+       [(show-plaintext (:plaintext note))]
+       (flatten
+        (for [[section-id section] sections
+              :let [type (section "type")
+                    section-name (section "name")]]
+          [(m/SizedBox .height 10)
+           (m/SelectableText section-name
+                             .style (.-titleMedium tthm))
+           (case type
+             "table" (show-table section)
+             "list" (show-list section)
+             "table2" (show-table2 section)
+             "voice" (m/Text "<recording>")
+             "text" (show-text section)
+             "reminder" (show-reminder section)
+             ;;The media needs to know the owner of the note to
+             ;;find the content
+             "media" (show-media section-name section (:owner note) local-images?)
+             (m/Text (str "<" type ">")))])))))))

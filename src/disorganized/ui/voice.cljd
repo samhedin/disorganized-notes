@@ -1,0 +1,337 @@
+(ns disorganized.ui.voice
+  (:require
+   ["package:share_plus/share_plus.dart" :refer [XFile Share]]
+   ["package:flutter_recorder/flutter_recorder.dart" :refer [Recorder PCMFormat]]
+   ["package:just_audio/just_audio.dart" :as ja]
+   ["package:firebase_ai/firebase_ai.dart" :as ai]
+   ["dart:convert" :as c]
+   ["dart:io" :refer [Platform]]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:flutter/services.dart" :as svc]
+   ["package:path_provider/path_provider.dart" :refer [getApplicationDocumentsDirectory]]
+   ["dart:io" :refer [File Directory]]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.string :as string]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState Reference DownloadTask]]
+   [disorganized.model :as model]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:file_picker/file_picker.dart" :refer [FilePicker]]
+   ["package:path/path.dart" :refer [basename]]
+   ["package:flutter/material.dart" :as m]
+   [cljd.flutter :as f]))
+
+(def voice-schema
+  (ai/Schema.object
+   .properties
+   (dutils/stringKeys
+    {"items"
+     (ai/Schema.array
+      .items (ai/Schema.string
+              .description "If the user lists any items, like todos or groceries, make a list of it. Only fill this if the user actually makes a list. Example: saying apple, banana, meat, milk. Or, for example: Todo: Water plants, take out the trash."
+              .nullable true))
+
+     "text" (ai/Schema.string
+             .description "If no items, just the text"
+             .nullable true)})
+
+   .optionalProperties ["items" "text"]))
+
+(defn record [file-path]
+  (let [permission? (await (dutils/requestMicrophonePermission))]
+    (println "permission " permission?)
+    (when permission?
+      (await (Recorder.instance.init
+              .format PCMFormat.f32le))
+      (Recorder.instance.setSilenceDetection
+       .enable true
+       .onSilenceChanged (fn [is-silent db]
+                           (println "recorder is silent? " is-silent)))
+
+      (Recorder.instance.setSilenceThresholdDb -27)
+      (Recorder.instance.setSilenceDuration 0.5)
+      (Recorder.instance.setSecondsOfAudioToWriteBefore 0.1)
+
+      (Recorder.instance.start)
+
+      (Recorder.instance.startRecording
+       .completeFilePath file-path))))
+
+(defn make-local-path [id]
+  (let [appdoc (await (getApplicationDocumentsDirectory))
+        path (str (.-path (.-absolute appdoc)) "/" id ".m4a")]
+    path))
+
+(defn make-remote-ref [id note-id section-id]
+  (let [storage-ref (FirebaseStorage.instance.ref)]
+    (.child storage-ref (str "/voice/"
+                             (model/uid)
+                             "/"
+                             note-id
+                             "/"
+                             section-id
+                             ".m4a"))))
+
+(defn transcribe [file]
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+                                .model model/gemini-model
+                                .generationConfig
+                                (ai/GenerationConfig
+                                 .responseMimeType "application/json"
+                                 .responseSchema voice-schema))
+
+        bytes (await (.readAsBytes file))
+        prompt (ai/TextPart "Transcribe what's said in this audio recording. If it's listing items, return the items as an array. Use speaker labels if there are multiple speakers.")
+        audio (ai/InlineDataPart "audio/m4a" bytes)
+        response (await (.generateContent model [(ai/Content.multi [prompt audio])]))
+        response (model/dart->clj-ds (c/jsonDecode (.-text response)))]
+
+    response))
+
+(defn upload-recording [id ^m/ScaffoldMessengerState scaffold-messenger note-id section-id]
+  (.showSnackBar scaffold-messenger
+                 (m/SnackBar
+                  .content (m/Text (str "Uploading, stand by..."))))
+  (let [local-path (await (make-local-path id))
+        file (File local-path)
+        ^Reference ref (make-remote-ref id note-id section-id)
+        json (await (transcribe file))]
+
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (assoc-in m [:sections section-id "content" "transcription2"]
+                              (str (json "text"))))])
+
+    (when (seq (json "items"))
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      (let [list-section
+                            (model/default-section-map
+                             "list"
+                             (count (m :sections))
+                             "voice list")
+                            id (list-section "id")
+
+                            items (mapv (fn [d]
+                                          {"id" (str (random-uuid))
+                                           "children" []
+                                           "data" d}) (json "items"))]
+
+                        (update m :sections
+                                #(assoc %
+                                        id
+                                        (assoc list-section "content" items)))))]))
+
+    (await (.putFile ref file))))
+
+(defn voice-recording-in-progress [*recording content paused?  ^m/ScaffoldMessengerState scaffold-messenger note-id section-id *paused? tthm]
+
+  [(m/Center
+    .child (m/Text "Recording in progress"
+                   .style (.-titleLarge tthm)))
+
+   (m/SizedBox .height 10)
+   (f/widget
+    :watch [brightness (rd/subscribe [::model/get-brightness])]
+    (m/ElevatedButton.icon
+     .style (m/ElevatedButton.styleFrom
+             .elevation 2
+             .shape (m/RoundedRectangleBorder
+                     .side (m/BorderSide .color (if (= "dark" brightness)
+                                                  (theme/hsl 0 0 0.2)
+                                                  (theme/hsl 0 0 0.7)))
+                     .borderRadius (m/BorderRadius.circular 15)))
+     .label (m/Text "Stop")
+     .icon (m/Icon m/Icons.stop)
+     .onPressed
+     (fn []
+       (reset! *recording false)
+       (Recorder.instance.stopRecording)
+       (let [id (content "recording-id")]
+         (upload-recording id scaffold-messenger note-id section-id)))))])
+
+(defn share-file [path section-id section-name]
+  (await (Share.shareXFiles [(XFile path)] .text (str section-name "_recording"))))
+
+(defn download-recording [recording-id section-id note-id section-id section-name]
+  (let [path (await (make-local-path recording-id))
+        file (File path)
+        ^Reference recording (make-remote-ref recording-id note-id section-id)]
+
+    (if (await (.exists file))
+      (share-file path section-id section-name)
+      (do
+        (.create file .recursive true)
+        (let [^DownloadTask task (.writeToFile recording file)]
+          (.listen
+           (.-snapshotEvents task)
+           (fn [snapshot]
+             (when (= (.-state snapshot)
+                      TaskState.success)
+               (share-file path section-id section-name)
+               nil)))))))
+  nil)
+
+(defn recording-completed [{:strs [recording-id transcription2]} section-id note-id section-id section-name]
+  [(if transcription2
+     (f/widget
+      :context ctx
+      :get [m/ScaffoldMessenger]
+      (m/InkWell
+       .child
+       (m/SelectableText transcription2)
+       .onLongPress (fn []
+                      (await (svc/Clipboard.setData
+                              (svc/ClipboardData
+                               .text
+                               transcription2)))
+                      (when kIsWeb
+                        (model/snackbar scaffold-messenger "Copied!"))
+                      nil)))
+     (m/SizedBox
+      .height 50
+      .width 50
+      .child (m/Center
+              .child (m/CircularProgressIndicator))))
+
+   (m/SizedBox .height 10)
+   (f/widget
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [player (ja/AudioPlayer)]
+    :watch [{playing .-playing
+             playbackevent .-playbackEvent} (.playerEventStream player)
+            speed (atom 1.0) :as *speed]
+
+    (m/AnimatedCrossFade
+     .duration (Duration .milliseconds 250)
+     .crossFadeState (if (and playing (not= (.-processingState playbackevent)
+                                            ja/ProcessingState.completed))
+                       m/CrossFadeState.showFirst
+                       m/CrossFadeState.showSecond)
+
+     .firstChild (f/widget
+                  :padding {:vertical 24}
+                  (m/Column
+                   .crossAxisAlignment m/CrossAxisAlignment.stretch
+
+                   .children
+                   [(m/Row
+                     .children
+                     [(m/Expanded
+                       .child (m/OutlinedButton.icon
+                               .label (m/Text "- 0.25x")
+                               .icon (m/Icon (m/Icons.fast_rewind))
+                               .onPressed (fn []
+                                            (let [s (- speed 0.25)]
+                                              (await (.setSpeed player s))
+                                              (reset! *speed s)))))
+
+                      (m/Expanded
+                       .child (m/OutlinedButton.icon
+                               .label (m/Text "+ 0.25x")
+                               .icon (m/Icon (m/Icons.fast_forward))
+                               .onPressed (fn []
+                                            (let [s (+ speed 0.25)]
+                                              (await (.setSpeed player s))
+                                              (reset! *speed s)))))])
+                    (m/SizedBox .height 10)
+                    (m/OutlinedButton.icon
+                     .onPressed (fn []
+                                  (await (.pause player)))
+                     .icon (m/Icon (m/Icons.pause))
+                     .label (m/Text "Pause"))
+
+                    (m/OutlinedButton.icon
+                     .icon (m/Icon (m/Icons.stop))
+                     .onPressed (fn []
+                                  (await (.stop player)))
+                     .label (m/Text "Stop"))]))
+
+     .secondChild
+
+     (m/Row
+      .children
+      [(m/Expanded
+        .child (m/OutlinedButton.icon
+                .icon (m/Icon m/Icons.play_arrow)
+
+                .label (m/Text "Play recording")
+                .onPressed
+                (fn []
+                  (let [url (await (.getDownloadURL (make-remote-ref nil note-id section-id)))]
+                    (await (.setUrl player url))
+                    (.play player)))))])))
+
+   (m/SizedBox .height 5)
+   (f/widget
+    :get {{tthm .-textTheme} m/Theme}
+
+    (m/OutlinedButton.icon
+     .icon (m/Icon m/Icons.file_download)
+
+     .label (m/Text "Download recording")
+     .onPressed
+     (fn []
+       (download-recording recording-id section-id note-id section-id section-name))))])
+
+(defn start-recording [section-id *recording]
+
+  (let [id (str (random-uuid))
+        path (await (make-local-path id))]
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+        (assoc-in m [:sections section-id "content" "recording-id"] id))])
+    (reset! *recording true)
+    (record path)))
+
+(defn show [section-id note-id section-name]
+  (f/widget
+   :key (str section-id "-voice")
+   :watch [{{:strs [content start-recording? id]} section-id} (rd/subscribe [::model/current-sections])
+
+           current-sections (rd/subscribe [::model/current-sections])
+
+           recording? (atom false) :as *recording
+           paused? (atom false) :as *paused?]
+   :let [recording-id? (content "recording-id")]
+
+   :managed [_ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                    (fn [_]
+                      (when (and (not recording-id?)
+                                 start-recording?)
+                        (start-recording section-id  *recording))))
+
+                   nil) :dispose nil]
+
+   :get [m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+
+   (m/Align
+    .alignment m/Alignment.topLeft)
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.stretch
+    .children
+    (cond
+      recording?
+      (voice-recording-in-progress  *recording content paused? scaffold-messenger note-id id *paused? tthm)
+
+      recording-id?
+      (recording-completed content section-id note-id id section-name)
+
+      :else
+      [(if kIsWeb
+         (m/Text "Recording only supported on mobile devices")
+         (f/widget
+
+          (m/OutlinedButton.icon
+           .icon (m/Icon m/Icons.mic)
+           .label (m/Text "Record")
+           .onPressed (fn []
+                        (start-recording section-id  *recording)))))]))))

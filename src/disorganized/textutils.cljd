@@ -1,0 +1,106 @@
+(ns disorganized.textutils
+  (:require ["package:flutter/material.dart" :as m]
+            [clojure.string :as string]))
+
+(defn renumber-following [text]
+  ;; Increment consecutive numbered list items at the start of text by 1.
+  ;; Stops at blank lines or non-numbered lines.
+  (if (string/blank? text)
+    text
+    (let [lines (string/split text "\n")]
+      (->> lines
+           (reduce
+            (fn [[done res] line]
+              (if (or done
+                      (string/blank? line)
+                      (not (re-find #"^\d+\.\s" line)))
+                [true (conj res line)]
+                [false (conj res (string/replace-first line #"^\d+" #(str (inc (int/parse %)))))]))
+            [false []])
+           second
+           (string/join "\n")))))
+
+(defn renumber-alpha-following [text]
+  ;; Increment consecutive alpha list items (e.g. "a) ") at the start of text by 1 letter.
+  ;; Stops at blank lines or non-alpha-list lines.
+  (if (string/blank? text)
+    text
+    (let [lines (string/split text "\n")]
+      (->> lines
+           (reduce
+            (fn [[done res] line]
+              (if (or done
+                      (string/blank? line)
+                      (not (re-find #"^[a-zA-Z]\)\s" line)))
+                [true (conj res line)]
+                [false (conj res (string/replace-first line #"^[a-zA-Z]"
+                                                       #(str (char (inc (int (first %)))))))]))
+            [false []])
+           second
+           (string/join "\n")))))
+
+(defn next-number [s]
+  ;; return (inc N) if line starts with "N. "
+  (when-let [[_ n] (re-find #"^(\d+)\. " s)]
+    (inc (int/parse n))))
+
+(defn next-alpha [s]
+  ;; return the next letter if starts with "x) "
+  (when-let [[_ ch] (re-find #"^([a-zA-Z])\)\s" s)]
+    (let [c (first ch)
+          next-c (char (inc (int c)))]
+      (str next-c ") "))))
+
+(defn alpha-line? [s]
+  ;; true if string starts with single letter + ") "
+  (boolean (re-find #"^[a-zA-Z]\)\s.*" s)))
+
+(defn maintain-enumeration
+  "         This callback auto inserts new lines when the user is adding items
+          i.e if they type
+            - hello
+                 and press enter, another - will be inserted."
+
+  [text *previous-text tc]
+  (let [previous-text @*previous-text]
+    (reset! *previous-text text)
+    ;;We have to make sure that the user isn't deleting text.
+    ;;if they are currently deleting text,
+    ;;we don't want to auto insert a new list item.
+    (when (and (< (count previous-text) (count text))
+               (> (count text) 2))
+      (let [cursor-pos (.-baseOffset (.-selection tc))]
+        (when (and (> cursor-pos 0)
+                   (= "\n" (subs text (dec cursor-pos) cursor-pos)))
+          (let [text-before (subs text 0 cursor-pos)
+                text-after (subs text cursor-pos)
+                lines-before (string/split text-before "\n")
+                prev-line (when (>= (count lines-before) 2)
+                            (nth lines-before (- (count lines-before) 2)))]
+            (cond
+              (and prev-line (string/starts-with? prev-line "- "))
+              (set! (.-value tc)
+                    (m/TextEditingValue
+                     .text (str text-before "- " text-after)
+                     .selection (m/TextSelection.collapsed .offset (+ cursor-pos 2))))
+
+              (and prev-line (re-find #"^\d+\.\s" prev-line))
+              (let [new-item (str (next-number prev-line) ". ")
+                    [leading rest-after] (if (string/starts-with? text-after "\n")
+                                           ["\n" (subs text-after 1)]
+                                           ["" text-after])]
+                (set! (.-value tc)
+                      (m/TextEditingValue
+                       .text (str text-before new-item leading (renumber-following rest-after))
+                       .selection (m/TextSelection.collapsed .offset (+ cursor-pos (count new-item))))))
+
+              (and prev-line (re-find #"^[a-zA-Z]\)\s.*" prev-line))
+              (let [new-alpha (next-alpha prev-line)
+                    [leading rest-after] (if (string/starts-with? text-after "\n")
+                                           ["\n" (subs text-after 1)]
+                                           ["" text-after])]
+                (set! (.-value tc)
+                      (m/TextEditingValue
+                       .text (str text-before new-alpha leading (renumber-alpha-following rest-after))
+                       .selection (m/TextSelection.collapsed .offset (+ cursor-pos (count new-alpha)))))))))))
+    nil))

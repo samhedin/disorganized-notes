@@ -1,0 +1,165 @@
+(ns disorganized.ui.text
+  (:require
+   ["package:disorganized_notes/markdowntexteditingcontroller.dart" :refer [MarkdownTextEditingController]]
+   [disorganized.textutils :refer [maintain-enumeration]]
+   ["package:intl/intl.dart" :as intl]
+   [hti.re-dash.alpha :as rd]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [cljd.flutter :as f]
+   [clojure.string :as string]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/material.dart" :as m]
+   [disorganized.ui.popup :as popup]
+   [disorganized.model :as utils]
+   [disorganized.model :as model]))
+
+
+(defn insert-timestamp [timeformat-24-hours? section-id]
+  (let [format (if timeformat-24-hours?
+                 (.add_Hm (intl/DateFormat.yMd))
+                 (.add_jm (intl/DateFormat.yMd)))
+        time
+        (str " " (.format format (DateTime.now)) " ")]
+    
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (update-in m [:sections section-id "content"]
+                              #(str % time)))])
+
+     nil))
+
+(defn text-counter [ctx text]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+
+    (m/AlertDialog
+     .content (m/Text (str "Chars: " (count (str text))
+                           "\nWords: "
+                           (count (clojure.string/split (str text) #"\s+"))))
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Ok"))]))))
+
+(defn properties [note-id section *section-size]
+  [(f/widget
+    :get {{cs .-colorScheme} m/Theme}
+    :let [section-id (section "id")]
+    :get [m/ScaffoldMessenger :timeformat-24-hours?]
+    :watch [premium? (rd/subscribe [::model/premium?])]
+    :context ctx
+    :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+    (m/PopupMenuButton
+     .clipBehavior m/Clip.antiAlias
+
+     .onSelected (fn [selected]
+                   (case selected
+                     "count" (if premium? (text-counter ctx content)
+                                 (model/paywall scaffold-messenger))
+                     
+                     "time" (if premium?
+                              (insert-timestamp timeformat-24-hours? (section "id"))
+                              (model/paywall scaffold-messenger))
+                     
+                     "delete" (popup/delete-section
+                               ctx
+                               note-id
+                               section-id
+                               section
+                               *section-size))
+                   nil)
+     .itemBuilder (fn [_]
+                    (let [^#/(List m/PopupMenuItem) v
+                          (concat
+                           [(m/PopupMenuItem
+                             .value "count"
+                             .child (m/ListTile
+                                     .title (m/Text "Word/char count")
+                                     .trailing (m/Visibility
+                                                .visible (not premium?)
+                                                .child
+                                                (m/Icon m/Icons.star_outline))))
+                            (m/PopupMenuItem
+                             .value "time"
+                             .child (m/ListTile
+                                     .title (m/Text "Insert timestamp")
+                                     .trailing (m/Visibility
+                                                .visible (not premium?)
+                                                .child
+                                                (m/Icon m/Icons.star_outline))))
+                            (m/PopupMenuItem
+                             .value "delete"
+                             .child (m/ListTile
+                                     .title (m/Text "Delete section")))])]
+
+                      v))))])
+
+(defn show [section-id]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])
+           premium? (rd/subscribe [::model/premium?])]
+   :padding {:left 4}
+   
+   :managed [tc (MarkdownTextEditingController)
+             *prev (atom "") :dispose nil
+             _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                    (fn [_]
+                      (when (not= content (.-text tc))
+                        (.-text! tc content))
+                      nil))
+                   nil) :dispose nil]
+   :context ctx
+   :watch [brightness (rd/subscribe [::model/get-brightness])
+           restructure? (rd/subscribe [::model/get-restructure-mode section-id])]
+
+   (if restructure?
+     (m/Align
+      .alignment m/Alignment.bottomLeft
+      .child
+      (m/Column
+       .crossAxisAlignment m/CrossAxisAlignment.start
+       .children
+       [(m/Text
+         (if premium?
+           (str "Chars: " (count (.-text tc))
+                "\nWords: "
+                (count (clojure.string/split (.-text tc) #"\s+")))
+
+           (str "Chars: (premium only)"
+                "\nWords: (premium only)"))
+         .style (.-titleSmall tthm))]))
+     (m/Column
+      .children
+      [(m/Focus
+        .onFocusChange (fn [hasfocus]
+                         (when (not hasfocus)
+                           (rd/dispatch [::model/update-current-note
+                                         (fn [m]
+                                           (assoc-in m [:sections section-id "content"]
+                                                     (.-text tc)))])))
+        .child
+        (m/TextFormField
+         .textCapitalization m/TextCapitalization.sentences
+         .autocorrect true
+         .enableSuggestions true
+         .onChanged (fn [text]
+                      (maintain-enumeration text *prev tc))
+         .controller tc
+         .maxLines nil
+         .decoration (m/InputDecoration
+                      .hintText "Text here"
+                      .hintStyle (.merge
+                                  (.-bodySmall tthm)
+                                  (theme/faded-text-style brightness)))
+         .onTapOutside (fn [event]
+                         (rd/dispatch [::model/update-current-note
+                                       (fn [m]
+                                         (assoc-in m [:sections  section-id "content"]
+                                                   (.-text tc)))])
+                         (.unfocus (.-primaryFocus (.instance m/FocusManager))))))
+
+       (model/url-buttons content)
+       (m/SizedBox .height 12)]))))

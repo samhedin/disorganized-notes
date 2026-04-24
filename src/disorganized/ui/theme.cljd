@@ -1,0 +1,333 @@
+(ns disorganized.ui.theme
+  (:require ["package:flutter/material.dart" :as m]))
+
+(def border-radius (m/BorderRadius.circular 17))
+(def popupmenu-border (m/BorderRadius.circular 17))
+
+(defn ^m/Color hsl
+  "Alpha 0-1
+  Hue 0-360
+  Saturation 0-1
+  Lightness 0-1"
+  [h s l]
+  (.toColor (m/HSLColor.fromAHSL 1 h s l)))
+
+(defn text-theme
+  "https://youtu.be/9-oefwZ6Z74"
+  [brightness]
+  (m/TextTheme
+   .titleLarge
+   (m/TextStyle
+    .fontWeight m/FontWeight.bold
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.9)
+             (hsl 0 0 0.1))
+    .height 1.4
+    .fontSize 20)
+
+   .titleMedium
+   (m/TextStyle
+    .height 1.4
+    .fontWeight m/FontWeight.bold
+
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.9)
+             (hsl 0 0 0.1))
+    .fontSize 18)
+
+   .titleSmall
+   (m/TextStyle
+    .height 1.4
+    .fontWeight m/FontWeight.bold
+
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.9)
+             (hsl 0 0 0.1))
+    .fontSize 16)
+
+   .bodyLarge
+   (m/TextStyle
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.9)
+             (hsl 0 0 0.1))
+    .height 1.4
+    .fontSize 16)
+
+   .bodyMedium
+   (m/TextStyle
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.9)
+             (hsl 0 0 0.1))
+    .height 1.4
+    .fontSize 16)
+
+   .bodySmall
+   (m/TextStyle
+    .fontSize 14
+    .height 1.4
+    .color (if (= brightness "dark")
+             (hsl 0 0 0.65)
+             (hsl 0 0 0.35)))))
+
+(defn outlined-button-style [brightness]
+  (if (= brightness "dark")
+    (m/OutlinedButton.styleFrom
+     .side (m/BorderSide .color (hsl 0 0 0.2))
+
+     .shape (m/RoundedRectangleBorder
+             .borderRadius border-radius)
+
+     .foregroundColor (hsl 0 0 0.95))
+
+    (m/OutlinedButton.styleFrom
+     .side (m/BorderSide .color (hsl 0 0 0.8))
+     .shape (m/RoundedRectangleBorder
+             .borderRadius border-radius)
+     .foregroundColor (hsl 0 0 0.05))))
+
+(defn text-button-style [brightness]
+  (if (= brightness "dark")
+    (m/TextButton.styleFrom
+     .foregroundColor (hsl 0 0 0.95))
+
+    (m/TextButton.styleFrom
+     .foregroundColor (hsl 0 0 0.05))))
+
+(defn outlined-button [brightness]
+  (m/OutlinedButtonThemeData
+   .style (outlined-button-style brightness)))
+
+(defn elevated-button-style [brightness]
+  (if (= brightness "dark")
+    (m/ElevatedButton.styleFrom
+     .elevation 1
+     .backgroundColor (hsl 0 0 0.08)
+     .shape (m/RoundedRectangleBorder
+             .side (m/BorderSide .color (hsl 0 0 0.2))
+             .borderRadius border-radius)
+
+     .foregroundColor (hsl 0 0 0.95))
+
+    (m/ElevatedButton.styleFrom
+     .elevation 1
+     .backgroundColor (hsl 0 0 1)
+     .shape (m/RoundedRectangleBorder
+             .side (m/BorderSide .color (hsl 0 0 0.95))
+             .borderRadius border-radius)
+     .foregroundColor (hsl 0 0 0.05))))
+
+(defn elevated-button [brightness]
+  (m/ElevatedButtonThemeData
+   .style
+   (elevated-button-style brightness)))
+
+(defn chip [brightness]
+  (if (= brightness "dark")
+    (m/ChipThemeData
+     .backgroundColor (hsl 0 0 0.05)
+     .labelStyle (m/TextStyle .color (hsl 0 0 0.95))
+     .shape
+     (m/RoundedRectangleBorder
+      .side (m/BorderSide .color (hsl 0 0 0.2))
+      .borderRadius border-radius))
+
+    (m/ChipThemeData
+     .labelStyle (m/TextStyle .color (hsl 0 0 0.05))
+     .backgroundColor (hsl 0 0 1)
+     .shape
+     (m/RoundedRectangleBorder
+      .side (m/BorderSide .color (hsl 0 0 0.8))
+      .borderRadius border-radius))))
+
+(defn expansiontile [brightness]
+  (m/ExpansionTileThemeData
+   .collapsedShape (m/RoundedRectangleBorder
+                    .borderRadius border-radius)
+
+   .shape (m/RoundedRectangleBorder
+           .borderRadius border-radius)))
+
+(defn menutheme [brightness]
+  (let [^#/(m/WidgetStatePropertyAll) size (m/WidgetStateProperty.all
+                                            (m/Size double.infinity 400))]
+    (if (= brightness "dark")
+      (m/MenuThemeData
+       .style (m/MenuStyle
+               .maximumSize size
+
+               .backgroundColor (m/WidgetStateProperty.all
+                                 (hsl 0 0 0.15))
+
+               .shape (m/WidgetStateProperty.all
+                       (m/RoundedRectangleBorder
+                        .side (m/BorderSide .color (hsl 0 0 0.2))
+
+                        .borderRadius border-radius))))
+
+      (m/MenuThemeData
+       .style (m/MenuStyle
+               .maximumSize size
+
+               .backgroundColor (m/WidgetStateProperty.all
+                                 (hsl 0 0 1))
+               .shape (m/WidgetStateProperty.all
+                       (m/RoundedRectangleBorder
+                        .side (m/BorderSide .color (hsl 0 0 0.8))
+                        .borderRadius border-radius)))))))
+
+(defn c [color]
+  (m/Color color))
+
+(def default-light-accent-color 33)
+(def default-dark-accent-color 33)
+
+(defn fab-color [prefs brightness]
+  (if (= "light" brightness)
+    (hsl
+     (if-let [hue (prefs "accent-color-light")]
+       hue
+       default-light-accent-color)
+     0.8 0.50)
+
+    (hsl
+     (if-let [hue (prefs "accent-color-dark")]
+       hue
+       default-light-accent-color)
+     0.80 0.30)))
+
+(defn faded-text-style [brightness]
+  (m/TextStyle
+   .color (if (= m/Brightness.dark brightness)
+            (m/Colors.white.withOpacity 0.6)
+            (m/Colors.black.withOpacity 0.6))))
+
+;; https://m3.material.io/styles/color/roles
+;; Surface – A role used for backgrounds and large, low-emphasis areas of the screen.
+
+;; Primary, Secondary, Tertiary – Accent color roles used to emphasize or de-emphasize foreground elements.
+
+;; Container – Roles used as a fill color for foreground elements like buttons. They should not be used for text or icons.
+
+;; On – Roles starting with this term indicate a color for text or icons on top of its paired parent color. For example, on primary is used for text and icons against the primary fill color.
+
+;; Variant – Roles ending with this term offer a lower emphasis alternative to its non-variant pair. For example, outline variant is a less emphasized version of the outline color.
+
+(defn customized-theme [theme prefs]
+  (let [^m/ThemeData t
+        (case theme
+          "dark"
+          (m/ThemeData
+           .useMaterial3 true
+           .textTheme (text-theme "dark")
+
+           .highlightColor (hsl (or (prefs "accent-color-dark")
+                                    default-dark-accent-color) 0.7 0.5)
+
+           .colorScheme
+           (m/ColorScheme
+            .brightness m/Brightness.dark
+            .surface (hsl 0 0 0) ;;background
+            .surfaceContainerHighest (hsl 0 0 0.05) ;;cards, etc
+            .surfaceContainerHigh (hsl 0 0 0.02)    ;;on cards
+            .onSecondaryContainer (hsl 0 0 0.95)
+            .onTertiary (hsl 0 0 0.3)
+            
+            .onSurface (hsl 0 0 0.95) ;;main text/foreground elements
+            .onSurfaceVariant (hsl 0 0 0.6) ;;muted text/foreground elements
+
+            .primary (hsl 0 0 0.95)
+            .onPrimary (hsl 0 0 0.05)
+
+            .secondary (hsl 0 0 0.15)
+            .onSecondary (hsl 0 0 0.95)
+
+            .error (hsl 0 0.7 0.5)
+            .onError (hsl 0 0 1))
+
+           .dialogTheme (m/DialogThemeData
+                         .backgroundColor (hsl 0 0 0.1))
+           .chipTheme (chip "dark")
+           .expansionTileTheme (expansiontile "dark")
+           .outlinedButtonTheme (outlined-button "dark")
+           .elevatedButtonTheme (elevated-button "dark")
+
+           .sliderTheme (m/SliderThemeData
+                         .showValueIndicator m/ShowValueIndicator.always)
+
+           .checkboxTheme (m/CheckboxThemeData
+                           .shape (m/CircleBorder
+                                   .side (m/BorderSide .color (hsl 0 0 0.6))))
+
+           .menuTheme (menutheme "dark")
+
+           .popupMenuTheme
+           (m/PopupMenuThemeData
+            .color (hsl 0 0 0.1)
+            .shape (m/RoundedRectangleBorder
+                    .side (m/BorderSide .color (hsl 0 0 0.2))
+                    .borderRadius popupmenu-border))
+
+           .cardTheme
+           (m/CardThemeData
+            .color (hsl 0 0 0.1)
+            .shape (m/RoundedRectangleBorder
+                    .side (m/BorderSide .color (hsl 0 0 0.2))
+                    .borderRadius border-radius)))
+
+          "light" (m/ThemeData
+                   .textTheme (text-theme "light")
+
+                   .sliderTheme (m/SliderThemeData
+                                 .showValueIndicator m/ShowValueIndicator.always)
+                   .highlightColor (hsl (or (prefs "accent-color-light")
+                                            default-light-accent-color) 0.7 0.5)
+
+                   .outlinedButtonTheme (outlined-button "light")
+                   .dialogTheme (m/DialogThemeData
+                                 .backgroundColor (hsl 0 0 1))
+                   .useMaterial3 true
+
+                   .colorScheme
+                   (m/ColorScheme
+                    .brightness m/Brightness.light
+                    .surface (hsl 0 0 0.95)
+                    .surfaceContainerHighest (hsl 0 0 1)
+                    .surfaceContainerHigh (hsl 0 0 0.98)
+                    .onTertiary (hsl 0 0 0.6)
+                    .onSurface (hsl 0 0 0.05)
+                    .onSurfaceVariant (hsl 0 0 0.4)
+
+                    .primary (hsl 0 0 0.1)
+                    .onPrimary (hsl 0 0 0.95)
+
+                    .secondary (hsl 0 0 0.85)
+                    .onSecondary (hsl 0 0 0.05)
+
+                    .error (hsl 0 0.7 0.5)
+                    .onError (hsl 0 0 0.95))
+
+                   .menuTheme (menutheme "light")
+                   .elevatedButtonTheme (elevated-button "light")
+                   .chipTheme (chip "light")
+
+                   .expansionTileTheme (expansiontile "light")
+
+                   .popupMenuTheme
+                   (m/PopupMenuThemeData
+                    .color (hsl 0 0 1)
+                    .shape (m/RoundedRectangleBorder
+                            .side (m/BorderSide .color (hsl 0 0 0.9))
+                            .borderRadius popupmenu-border))
+
+                   .checkboxTheme (m/CheckboxThemeData
+                                   .shape (m/CircleBorder
+                                           .side (m/BorderSide .color (hsl 0 0 0.3))))
+
+                   .cardTheme
+                   (m/CardThemeData
+                    .color (hsl 0 0 1)
+
+                    .shape (m/RoundedRectangleBorder
+                            .side (m/BorderSide .color (hsl 0 0 0.95))
+                            .borderRadius border-radius))))]
+    t))

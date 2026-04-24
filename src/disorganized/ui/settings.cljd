@@ -1,0 +1,1172 @@
+(ns disorganized.ui.settings
+  (:require ["package:flutter/material.dart" :as m]
+            ["package:awesome_notifications/awesome_notifications.dart" :as notif]
+            ["package:in_app_review/in_app_review.dart" :as review]
+            [disorganized.ui.theme :as theme]
+            [disorganized.ui.tutorial :as tutorial]
+            ["dart:convert" :as c]
+            [disorganized.prettyprint :as pp]
+            ["package:shared_preferences/shared_preferences.dart" :as sp]
+            ["package:purchases_flutter/purchases_flutter.dart" :as rc]
+            [disorganized.import.import :as import]
+            ["package:path_provider/path_provider.dart" :refer [getTemporaryDirectory]]
+            ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions Settings FieldPath]]
+            [disorganized.import.keep :as keep]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            ["package:archive/archive_io.dart" :as archive :refer [ArchiveFile ZipFileEncoder]]
+            ["package:share_plus/share_plus.dart"
+             :as share_plus
+             :refer [SharePlus XFile ShareParams]]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+            ["package:purchases_flutter/purchases_flutter.dart" :refer [Purchases CustomerInfo]]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference]]
+            ["package:flutter_colorpicker/flutter_colorpicker.dart" :as cp]
+            ["package:flutter/foundation.dart" :refer [kIsWeb]]
+            ["dart:io" :refer [Platform Directory File]]
+            ["package:purchases_ui_flutter/purchases_ui_flutter.dart" :as rcu]
+            ["package:go_router/go_router.dart" :as go_router :refer [GoRouterHelper]]
+            ["package:flutter/services.dart" :as svc]
+            ["package:firebase_auth/firebase_auth.dart" :refer [FirebaseAuth User]]
+            [cljd.flutter :as f]
+            [clojure.string :as string]
+            ["package:disorganized_notes/delete_account.dart" :as da]
+            ["package:disorganized_notes/firestore_db.dart" :as fdb]
+            [disorganized.model :as model]
+            [disorganized.ui.popup :as popup]
+            ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+            [hti.re-dash.alpha :as rd]
+            [disorganized.model :as utils]
+            ["package:disorganized_notes/utils.dart" :as dutils]))
+
+(defn settings-button [child onpressed]
+  (m/ElevatedButton
+   .child child
+   .onPressed onpressed))
+
+(defn radio-list-tile [title value groupValue onChanged]
+  (f/widget
+   :padding {:vertical 5}
+   (if (= value groupValue)
+     (m/Card
+      .elevation 0.5
+      .child (m/RadioListTile
+              .title title
+              .value value
+              .groupValue  groupValue
+              .onChanged
+              onChanged))
+
+     (m/RadioListTile
+      .title title
+      .value value
+      .groupValue  groupValue
+      .onChanged
+      onChanged))))
+
+(defn android-widget-update-preference [key value *property]
+  (rd/dispatch [::model/update-user-options
+                {key value}])
+
+  (let [prefs (await (sp/SharedPreferences.getInstance))]
+    (await (.setString prefs key value)))
+  (await (HomeWidget.updateWidget
+          .androidName "NoteWidgetReceiver"))
+  (reset! *property value)
+  (rd/dispatch [::model/fetch-user-options]))
+
+(defn android-widget-background-color [android-widget-bg-color- *android-widget-bg-color]
+  [(radio-list-tile
+    (m/Text "Black")
+    "black"
+    android-widget-bg-color-
+
+    (fn [v]
+      (android-widget-update-preference "widget-color" v *android-widget-bg-color)))
+
+   (radio-list-tile
+
+    (m/Text "White")
+    "white"
+    android-widget-bg-color-
+
+    (fn [v]
+      (android-widget-update-preference "widget-color" v *android-widget-bg-color)))
+
+   (radio-list-tile
+
+    (m/Text "Transparent")
+    "transparent"
+    @*android-widget-bg-color
+
+    (fn [v]
+      (android-widget-update-preference "widget-color" v *android-widget-bg-color)))])
+
+(defn android-widget-text-size [*android-widget-text-size]
+  [(m/RadioListTile
+    .title (m/Text "Small")
+    .value "small"
+    .groupValue @*android-widget-text-size
+    .onChanged
+    (fn [v]
+      (android-widget-update-preference "widget-text-size" v *android-widget-text-size)))
+
+   (m/RadioListTile
+    .title
+    (m/Text "Medium")
+    .value "medium"
+    .groupValue @*android-widget-text-size
+    .onChanged
+    (fn [v]
+      (android-widget-update-preference "widget-text-size" v *android-widget-text-size)))
+   (m/RadioListTile
+    .title
+    (m/Text "Large")
+    .value "large"
+    .groupValue @*android-widget-text-size
+    .onChanged
+    (fn [v]
+      (android-widget-update-preference "widget-text-size" v *android-widget-text-size)))])
+
+(defn android-widget-text-color [*android-widget-text-color]
+  [(radio-list-tile
+    (m/Text "Black")
+    "black"
+    @*android-widget-text-color
+
+    (fn [v]
+      (android-widget-update-preference "widget-text-color" v *android-widget-text-color)))
+
+   (radio-list-tile
+
+    (m/Text "White")
+    "white"
+    @*android-widget-text-color
+
+    (fn [v]
+      (android-widget-update-preference "widget-text-color" v *android-widget-text-color)))])
+
+(defn android-widget-show-checkboxes [*android-widget-show-checkboxes]
+  [(radio-list-tile
+    (m/Text "Yes")
+    "yes"
+    @*android-widget-show-checkboxes
+
+    (fn [v]
+      (android-widget-update-preference "widget-show-checkboxes" v *android-widget-show-checkboxes)))
+
+   (radio-list-tile
+
+    (m/Text "No")
+    "no"
+    @*android-widget-show-checkboxes
+
+    (fn [v]
+      (android-widget-update-preference "widget-show-checkboxes" v *android-widget-show-checkboxes)))])
+
+
+
+(defn update-email-popup [ctx ^User user?]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (m/TextEditingController)]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Enter new email")
+       (m/TextField
+        .controller tc)])
+     .actions
+     [(m/ElevatedButton
+       .child (m/Text "cancel")
+       .onPressed
+       (fn []
+         (.pop navigator)))
+      (m/ElevatedButton
+       .child (m/Text "Accept")
+       .onPressed (fn []
+                    (await (.verifyBeforeUpdateEmail user? (.-text tc)))
+                    (.pop navigator true)))]))))
+
+(defn select-tags-for-batch-export [ctx all-notes]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+
+    :let [all-tags (distinct (filter some? (flatten (map :tags all-notes))))]
+    :watch [selected-tags (atom #{})
+            :as *selected-tags]
+    :get {{tthm .-textTheme} m/Theme}
+
+    (m/AlertDialog
+     .content
+     (f/widget
+
+      (m/Column
+       .crossAxisAlignment m/CrossAxisAlignment.start
+       .mainAxisSize m/MainAxisSize.min
+       .children
+       (concat
+        [(m/Text "Select tags to include. Leave empty for all tags"
+                 .style (.-bodyLarge tthm))
+         (m/Autocomplete
+          .optionsViewOpenDirection m/OptionsViewOpenDirection.up
+
+          .fieldViewBuilder
+          (fn [_ tc focus-node on-submitted]
+            (m/Row
+             .children
+             [(f/widget
+               m/Expanded
+               (m/Align
+                .alignment m/Alignment.centerLeft)
+               (m/ConstrainedBox
+                .constraints (m/BoxConstraints
+                              .maxWidth 500))
+               (m/TextField
+                .onTapOutside (fn [_]
+                                (model/unfocus-then-run
+                                 nil))
+                .controller tc
+                .focusNode focus-node
+                .onSubmitted (fn [tag]
+                               (when (not (string/blank? (.-text tc)))
+                                 (swap! *selected-tags #(conj % (.-text tc)))
+                                 (.-text! tc ""))
+                               (on-submitted))))
+              (m/IconButton
+               .onPressed (fn []
+                            (when (not (string/blank? (.-text tc)))
+                              (swap! *selected-tags #(conj % (.-text tc)))
+                              (.-text! tc ""))
+                            nil)
+
+               .icon (m/Icon m/Icons.add))]))
+          .optionsBuilder
+          (fn [^m/TextEditingValue {:flds [text]}]
+            (println "all tags " all-tags)
+            (let [^#/(Iterable String) result
+                  (into []
+                        (filter (fn [^String x]
+                                  (string/includes? x text))
+                                all-tags))]
+              result)))]
+        (when (seq selected-tags)
+          (concat [(m/SizedBox .height 12)
+                   (m/Text "Selected "
+                           .style (.-titleMedium tthm))
+
+                   (m/SingleChildScrollView
+                    .scrollDirection m/Axis.horizontal
+
+                    .child (m/Row
+                            .mainAxisAlignment m/MainAxisAlignment.start
+                            .children
+                            (map (fn [tag]
+                                   (m/ElevatedButton
+                                    .child (m/Text tag)
+                                    .onPressed (fn []
+                                                 (swap! *selected-tags #(disj % tag)))))
+                                 selected-tags)))])))))
+     .actions
+     [(f/widget
+       :get [m/Navigator]
+       (m/TextButton
+        .onPressed #(.pop navigator :stop)
+        .child (m/Text "Cancel")))
+      (m/TextButton
+       .child (m/Text "Accept")
+       .onPressed (fn []
+                    (.pop navigator (if (seq selected-tags)
+                                      selected-tags
+                                      (into #{} all-tags)))))]))))
+
+(defn individual-files? [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content (m/Text "Generate one file per note or combine all of them into one file?
+
+The web version only supports the latter.")
+     .actions
+     [(m/TextButton
+       .child (m/Text "One document (recommended)")
+       .onPressed (fn []
+                    (.pop navigator false)))
+      (f/widget
+       :get [m/Navigator]
+       (m/TextButton
+        .onPressed #(.pop navigator true)
+        .child (m/Text (if kIsWeb
+                         "<not supported on web>"
+                         "One document per note"))))
+      (m/TextButton
+       .child (m/Text "Cancel")
+       .onPressed (fn []
+                    (.pop navigator :stop)))]))))
+
+(defn one-document-batch-export [timeformat-24-hours?  all-notes]
+  (let [exports (await (Future.wait
+                        (mapv #(pp/note-to-string % timeformat-24-hours? true) all-notes)))]
+    (await (SharePlus.instance.share
+            (ShareParams
+             .files [(XFile.fromData
+                      (c/utf8.encode (string/join "\n\n" exports))
+                      .mimeType "text/plain")]
+             .fileNameOverrides ["Disorganized_notes.md"])))))
+
+(defn unique-export-names
+  "Can't allow duplicate title names"
+  [exports]
+
+  (let [freqs (frequencies exports)]
+    (into []
+          (map-indexed (fn [i x]
+                         (if (> (freqs x) 1)
+                           (str x "_" i)
+                           x))
+                       exports))))
+
+(defn individual-file-export [timeformat-24-hours?  all-notes]
+  (let [exports (await
+                 (Future.wait
+                  (mapv
+                   #(pp/note-to-string-with-title % timeformat-24-hours? true)
+                   all-notes)))
+        export-titles (unique-export-names (map :title exports))
+
+        exports (map (fn [title {:keys [body]}]
+                       {:title title
+                        :body body})
+                     export-titles exports)
+
+        files (mapv (fn [{:keys [title body]}]
+                      (ArchiveFile.string (str title ".md") body)) exports)
+
+        encoder (ZipFileEncoder)
+        dir (await (getTemporaryDirectory))
+        path (str (.path dir) "/Disorganized_export.zip")]
+
+    (.create encoder path)
+    (mapv (fn [f] (.addArchiveFile encoder f)) files)
+    (.closeSync encoder)
+    (await (.share
+            (SharePlus.instance)
+            (ShareParams
+             .text "Exported notes as zip"
+             .files [(XFile path)])))))
+
+(defn batch-export [all-notes timeformat-24-hours?  ^m/ScaffoldMessengerState scaffold-messenger ctx ]
+  (let [selected-tags (await (select-tags-for-batch-export ctx all-notes))]
+    (when (not= :stop selected-tags)
+      (let [individual-files (await (individual-files? ctx))
+            notes (if (seq selected-tags)
+                    (filter #(some selected-tags (:tags %)) all-notes)
+                    all-notes)]
+
+        (.showSnackBar scaffold-messenger
+                       (m/SnackBar .content
+                                   (m/Text "Exporting, do not leave the app.")))
+        (when (not= :stop individual-files)
+          (if individual-files
+            (await (individual-file-export timeformat-24-hours?  notes))
+            (await (one-document-batch-export timeformat-24-hours?  notes))))))))
+
+(defn show-colorpicker [ctx default-hue current-hue]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :watch [hue (atom (or current-hue default-hue 33)) :as *hue]
+    (m/AlertDialog
+     .title
+     (m/Text "Select accent color")
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .children
+      [(m/Container
+        .width 40
+        .height 40
+        .decoration
+        (m/BoxDecoration
+         .color (theme/hsl hue 0.8 0.5)
+         .shape m/BoxShape.circle
+         .border (m/Border.all
+                  .color m/Colors.black
+                  .width 1))
+        .child (m/Text ""))
+       (m/Slider
+        .value hue
+        .label (str (.floor hue))
+        .min 0
+        .max 360
+        .divisions 360
+        .onChanged (fn [v]
+                     (reset! *hue (.floor v))))])
+     .actions
+     (concat
+      [(m/TextButton
+        .onPressed #(.pop navigator)
+        .child (m/Text "Cancel"))]
+
+      (when default-hue
+        [(m/TextButton
+          .onPressed #(.pop navigator default-hue)
+          .child (m/Text "Revert to default"))])
+
+      [(f/widget
+        (m/TextButton
+         .onPressed
+         (fn []
+           (.pop navigator hue))
+         .child (m/Text "Apply")))])))))
+
+(defn accent-colors [prefs]
+  (f/widget
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/ScaffoldMessenger]
+   :watch [accent-color-light (atom (or (prefs "accent-color-light") theme/default-light-accent-color)) :as *acl
+           
+
+           brightness (rd/subscribe [::model/get-brightness])
+           accent-color-dark (atom (or (prefs "accent-color-dark") theme/default-dark-accent-color)) :as *acd]
+   :watch [premium? (rd/subscribe [::model/premium?])]
+   (m/Row
+    .mainAxisAlignment m/MainAxisAlignment.start
+    .children
+    [(m/ElevatedButton
+      .onPressed (fn []
+                   (if premium?
+                     (when-let [color (await
+                                       (show-colorpicker
+                                        ctx
+                                        theme/default-light-accent-color
+                                        accent-color-light))]
+                       (reset! *acl color)
+                       (rd/dispatch [::model/update-user-options
+                                     {"accent-color-light" color}])
+                       (rd/dispatch [::model/fetch-user-options]))
+                     (model/prompt-to-paywall scaffold-messenger "Changing accent color requires premium")))
+      .child
+      (f/widget
+       :padding {:vertical 12
+                 :horizontal 12}
+       (m/Column
+        .children
+        [(m/Container
+          .width 40
+          .height 40
+          .decoration
+          (m/BoxDecoration
+           .color (theme/hsl accent-color-light 0.8 0.5)
+           .shape m/BoxShape.circle
+           .border (m/Border.all
+                    .color (if (= brightness m/Brightness.dark)
+                             m/Colors.white
+                             m/Colors.black)
+                    .width 1))
+          .child (m/Text ""))
+         (m/SizedBox .height 12)
+         (m/Text "Light mode"
+                 .style (.-labelLarge tthm))])))
+
+     (m/SizedBox .width 20)
+     (m/ElevatedButton
+
+      .onPressed (fn []
+                   (if premium?
+                     (when-let [color (await
+                                       (show-colorpicker
+                                        ctx
+                                        theme/default-dark-accent-color
+                                        accent-color-dark))]
+                       (reset! *acd color)
+                       (rd/dispatch [::model/update-user-options
+                                     {"accent-color-dark" color}])
+                       (rd/dispatch [::model/fetch-user-options]))
+                     (model/prompt-to-paywall scaffold-messenger "Changing accent color requires premium")))
+      .child
+      (f/widget
+       :padding {:horizontal 12
+                 :vertical 12}
+       (m/Column
+        .children
+        [(m/Container
+          .width 40
+          .height 40
+          .decoration
+          (m/BoxDecoration
+           .color (theme/hsl accent-color-dark 0.8 0.5)
+           .shape m/BoxShape.circle
+           .border (m/Border.all
+                    .color (if (= brightness m/Brightness.dark)
+                             m/Colors.white
+                             m/Colors.black)
+                    .width 1))
+          .child (m/Text ""))
+         (m/SizedBox .height 12)
+         (m/Text "Dark mode"
+                 .style (.-labelLarge tthm))])))])))
+
+(defn delete-user-storage-helper [prefix]
+  (let [storage-ref (FirebaseStorage.instance.ref)
+        uid (:user-id (model/current-user))
+        ^Reference path (.child storage-ref
+                                (str prefix uid))
+        folders  (.-prefixes (await (.listAll path)))]
+    (println "found " folders)
+    (doseq [^Reference f folders]
+      (doseq [^Reference i (.-items (await (.listAll f)))]
+        (await (.delete i))))))
+
+(defn delete-user-storage []
+  (await (delete-user-storage-helper "/media/"))
+  (await (delete-user-storage-helper "/media2/"))
+  (await (delete-user-storage-helper "/voice/")))
+
+(defn delete-user [saved-notes password-provider? password? email?]
+  (let [del (da/DeleteAccount)
+        uid (:user-id (model/current-user))
+        ids (mapv :id saved-notes)]
+
+    (await (delete-user-storage))
+    (if password-provider?
+      (await (.deleteUserAccount del
+                                 ids
+                                 uid
+                                 .password password?
+                                 .email email?))
+      (await (.deleteUserAccount del ids uid)))
+    (rd/dispatch [::model/empty-notes])))
+
+(defn delete-account-dialog [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :get [m/ScaffoldMessenger]
+    :let [user? (.-currentUser (FirebaseAuth.instance))
+          provider (when (and user? (not (model/user-is-anonymous)))
+                     (.-first (.-providerData user?)))]
+
+    :watch [saved-notes (rd/subscribe [::model/get-notes])
+            password-visible? (atom true) :as *password-visible]
+
+    :let [password-provider? (when provider (= (.-providerId provider) "password"))
+          email (when provider (.-email provider))]
+
+    :managed [tc (m/TextEditingController)
+              password-tc (m/TextEditingController)
+              _ (m/WidgetsBinding.instance.endOfFrame.then
+                 (fn [_]
+                   (reset! *password-visible false))) :dispose nil]
+
+    (if user?
+      (m/AlertDialog
+       .content
+       (m/Column
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        (concat [(m/Text "Account deletion" .style (.-titleMedium tthm))]
+                (if password-provider?
+                  [(m/Text "Enter password again")
+                   (m/TextFormField
+                    .obscureText (not password-visible?)
+                    .decoration (m/InputDecoration
+
+                                 .suffixIcon (m/IconButton
+                                              .icon (m/Icon (if password-visible?
+                                                              m/Icons.visibility_off
+                                                              m/Icons.visibility))
+                                              .onPressed (fn [] (swap! *password-visible not))))
+                    .controller password-tc)]
+                  [(m/Text "Child lock, enter exactly \"7394\" below")
+                   (m/TextField
+                    .controller tc
+                    .decoration (m/InputDecoration
+                                 .hintText "Enter 7394"))])))
+       .actions [(m/TextButton
+                  .onPressed #(.pop navigator)
+                  .child (m/Text "Cancel"))
+                 (m/TextButton
+                  .onPressed (fn []
+                               (when (and (not password-provider?)
+                                          kIsWeb)
+                                 (.showSnackBar scaffold-messenger
+                                                (m/SnackBar .content
+                                                            (m/Text "Users registered with google/apple need to delete their accounts through the app."))))
+
+                               (if (or password-provider? (= "7394" (.-text tc)))
+                                 (popup/confirm ctx "Really delete account? This is irreversible and will delete all your notes except shared ones."
+                                                (fn []
+                                                  (await (delete-user  saved-notes password-provider? (.-text password-tc) email))
+                                                  (.pop navigator)))
+                                 (do (.showSnackBar scaffold-messenger
+                                                    (m/SnackBar .content
+                                                                (m/Text "Wrong code, cancelling")))
+                                     (.pop navigator))))
+                  .child (m/Text "Delete!"))])
+      (m/AlertDialog
+       .content
+       (m/Text "The authentication SDK could not find an active user to delete. Please contact support and explain how in the world this happened.")
+       .actions [(m/ElevatedButton
+                  .onPressed #(.pop navigator)
+                  .child (m/Text "Cancel"))
+
+                 (m/Align
+                  .alignment m/Alignment.bottomLeft
+                  .child (m/ElevatedButton
+                          .onPressed
+                          (fn []
+                            (url/launch (str "mailto:support@getdisorganized.com?subject=Support case for " user?))
+                            nil)
+                          .child
+                          (m/Text "Send an email")))])))))
+
+(def ^m/Widget show
+  (f/build
+   [^go_router/GoRouterState router-state]
+   (f/widget
+    :watch [prefs (rd/subscribe [::model/prefs])
+            premium (rd/subscribe [::model/premium?])]
+    :watch
+    [brightness (rd/subscribe [::model/get-brightness])
+     premium? (rd/subscribe [::model/premium?])
+     theme (atom (or (prefs "color-scheme") "Device theme")) :as *radio-theme
+
+     disable-archive-swipe? (atom (prefs "disable-archive-swipe?")) :as *swipe?
+
+     notifications-allowed? (.isNotificationAllowed (notif/AwesomeNotifications))
+     android-widget-bg-color- (atom (or (prefs "widget-color") "black")) :as *android-widget-bg-color
+     android-widget-text-color- (atom (or (prefs "widget-text-color") "white")) :as *android-widget-text-color
+     android-widget-checkboxes- (atom (or (prefs "widget-show-checkboxes") "yes")) :as *android-widget-checkboxes
+     android-widget-text-size- (atom (or (prefs "widget-text-size") "medium")) :as *android-widget-text-size
+
+     start-expanded? (atom  (if (nil? (prefs "checked-lists-start-expanded"))
+                              true
+                              (prefs "checked-lists-start-expanded"))) :as *start-expanded?
+     sections-start-expanded? (atom (if (nil? (prefs "sections-start-expanded"))
+                                     true
+                                     (prefs "sections-start-expanded"))) :as *sections-start-expanded?]
+    :get [m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :let [user? (.-currentUser (FirebaseAuth.instance))
+          anonymous?  (model/user-is-anonymous)
+          provider (when (and user?
+                              (not anonymous?))
+                     (.-first (.-providerData user?)))
+          password-provider? (when provider (= (.-providerId provider) "password"))]
+
+    :context ctx
+    ;;:get {flutter-theme m/Theme}
+    :let [uid (:user-id (model/current-user))
+          children
+          (concat
+           (when anonymous?
+             [(m/Text "Register!"
+                      .style (.-titleLarge tthm))
+              (m/SizedBox .height 12)
+              (m/Text "You are not registered! If you lose your device, you will lose your notes.")
+              (m/SizedBox .height 12)
+              (settings-button
+               (m/Text "Register!")
+               (fn []
+                 (-> ctx go_router/GoRouterHelper
+                     (.push
+                      "/login"))
+                 nil))])
+           
+           (when (or true (not kIsWeb))
+             (cond
+               anonymous?
+               [(m/SizedBox .height 24)
+                
+                (m/Text "Web app"
+                        .style (.-titleLarge tthm))
+                (m/SizedBox .height 12)
+                (m/Text "Register and subscribe to use it!")
+                
+                (m/SizedBox .height 12)
+                (settings-button
+                 (m/Text "Register")
+                 (fn []
+                   (fn []
+                 (-> ctx go_router/GoRouterHelper
+                     (.push
+                      "/login"))
+                     
+                     nil)
+                   nil))
+                (m/SizedBox .height 8)
+                (settings-button
+                       (m/Text (str "app.getdisorganized.com"))
+                       (fn []
+                         (url/launch "https://app.getdisorganized.com/")
+                         nil))]
+               
+               (not premium)
+               [(m/SizedBox .height 24)
+                (m/Text "Web app"
+                        .style (.-titleLarge tthm))
+                (m/SizedBox .height 12)
+                (m/Text "Subscribe to use it!")
+                (m/SizedBox .height 12)
+                (settings-button
+                 (m/Text (str "Subscribe"))
+                 (fn []
+                   (model/paywall scaffold-messenger)
+                   nil))]
+               
+               :else [(m/SizedBox .height 24)
+                      (m/Text "Web app"
+                              .style (.-titleLarge tthm))
+                      (m/SizedBox .height 12)
+                      (m/Text "Check it out!")
+                      (m/SizedBox .height 12)
+                      (settings-button
+                       (m/Text (str "app.getdisorganized.com"))
+                       (fn []
+                         (url/launch "https://app.getdisorganized.com/")
+                         nil))]))
+
+
+           [(m/SizedBox .height 24)
+            (m/Text "Learn"
+                    .style (.-titleLarge tthm))
+
+            (m/SizedBox .height 12)
+            (m/ElevatedButton.icon
+             .label (m/Text "Intro and Manual")
+             .icon (m/Icon m/Icons.book)
+             .onPressed (fn []
+                          (-> ctx go_router/GoRouterHelper
+                              (.push
+                               "/manual"))
+                          nil))
+
+            (m/SizedBox .height 4)
+            (tutorial/example-notes-popup false)]
+
+           (when (and (not notifications-allowed?)
+                      (not kIsWeb))
+
+             [(m/SizedBox .height 8)
+              (m/Text "Notifications"
+                      .style (.-titleLarge tthm))
+              (m/SizedBox .height 8)
+              (m/Text "Notifications not permitted, reminders will not be received."
+                      .style (.-bodyLarge tthm))
+              (m/SizedBox .height 8)
+              (m/ElevatedButton
+               .onPressed (fn []
+                            (await (.requestPermissionToSendNotifications
+                                    (notif/AwesomeNotifications)))
+                            nil)
+               .child (m/Text "Grant notification permission"))])
+
+           [(m/SizedBox .height 24)
+            (m/Text "Note import/export"
+                    .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)
+            (settings-button
+             (m/Text "Import notes from other apps!")
+             (fn []
+               (import/import-note-popup ctx)
+               nil))
+            (m/SizedBox .height 8)
+            
+            (m/Text "Batch export" .style (.-titleMedium tthm))
+            (m/SizedBox .height 4)
+            (m/Text "Export all notes to Markdown.\nThis can be shared with e.g Google Docs for export to PDF, printing, and editing.")
+            (m/SizedBox .height 4)
+            
+            (f/widget
+             :get [m/ScaffoldMessenger :timeformat-24-hours]
+             :watch [all-notes (rd/subscribe [::model/get-notes])]
+             (settings-button
+              (m/Text "Export to Markdown")
+              (fn []
+                (await (batch-export all-notes timeformat-24-hours scaffold-messenger ctx))
+                nil)))]
+
+           
+
+           
+           [(m/SizedBox .height 24)
+            (m/Text "Visuals" .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)
+            (m/Text "May require restart")
+            (m/SizedBox .height 12)
+            (m/Text "Color scheme" .style (.-titleMedium tthm))
+            (m/SizedBox .height 12)
+            (radio-list-tile
+             (m/Text "Device theme")
+             "Device theme"
+             theme
+             (fn [v]
+               (rd/dispatch [::model/update-user-options
+                             {"color-scheme" v}])
+               (rd/dispatch [::model/fetch-user-options])
+               (reset! *radio-theme v)))
+            (radio-list-tile
+             (m/Text "Dark")
+             "dark"
+             theme
+
+             (fn [v]
+               (reset! *radio-theme v)
+               (rd/dispatch [::model/update-user-options
+                             {"color-scheme" v}])
+               (rd/dispatch [::model/fetch-user-options])))
+
+            (radio-list-tile
+             (m/Text "Light")
+             "light"
+             theme
+
+             (fn [v]
+               (reset! *radio-theme v)
+               (rd/dispatch [::model/update-user-options
+                             {"color-scheme" v}])
+               (rd/dispatch [::model/fetch-user-options])))
+            (m/SizedBox .height 12)
+            (m/Text (if premium? "Accent color" "Accent color (premium only)")
+                    .style (.-titleMedium tthm))
+            (m/SizedBox .height 12)
+            (accent-colors prefs)
+
+            (m/SizedBox .height 24)
+            (m/Text "Scale font size"
+                    .style (.-titleMedium tthm))
+            (m/Text "Default 1.0")
+            (f/widget
+             :watch [prefs-stream (.snapshots
+                                   (.doc
+                                    (.collection FirebaseFirestore.instance "users")
+                                    (model/uid)))]
+             :let [prefs (when prefs-stream
+                           ((model/dart->clj-ds
+                             (dutils/docSnapshotToMap
+                              prefs-stream)) "preferences"))
+                   font-scaling (if prefs
+                                  (or (prefs "font-scaling") 1.0)
+                                  1.0)]
+
+             (m/Slider
+              .value font-scaling
+              .onChanged (fn [v]
+                           (rd/dispatch [::model/update-user-options
+                                         {"font-scaling" v}]))
+              .label (string/join (take 4 (str font-scaling)))
+              .divisions 10
+              .min 0.8
+              .max 1.2))
+            (m/SizedBox .height 12)]
+
+       ;;Android widget
+           (when (and (not kIsWeb) Platform.isAndroid)
+             (concat [(m/Text "Home screen widget"
+                              .style (.-titleLarge tthm))
+                      (m/SizedBox .height 12)
+                      (m/Text "Android only. 
+Needs to be set each time you switch device or reinstall the app.")
+
+                      (m/SizedBox .height 12)
+                      (m/Text "Background color"
+                              .style (.-titleMedium tthm))
+                      (m/SizedBox .height 12)]
+
+                     (android-widget-background-color android-widget-bg-color- *android-widget-bg-color)
+                     [(m/Text "Home Widget Text color"
+                              .style (.-titleMedium tthm))
+                      (m/SizedBox .height 12)
+                      (m/Text "Only applies when background color is transparent")
+                      (m/SizedBox .height 12)]
+                     (android-widget-text-color *android-widget-text-color)
+
+                     [(m/SizedBox .height 12)
+                      (m/Text "Home Widget Text Size"
+                              .style (.-titleMedium tthm))
+                      (m/SizedBox .height 12)]
+                     (android-widget-text-size *android-widget-text-size)
+                     [(m/SizedBox .height 12)
+                      (m/Text "Show checkboxes on Home Widget"
+                              .style (.-titleMedium tthm))
+                      (m/SizedBox .height 12)]
+                     (android-widget-show-checkboxes *android-widget-checkboxes)))
+
+           [(m/Text "Behavior"
+                    .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)]
+
+           
+           [(m/Text "Lists " .style (.-titleMedium tthm))
+            (m/SizedBox .height 12)
+            (m/Text "For lists and reminders, the lists with checked items are expanded by default. 
+If there are many checked items, the list will never be expanded by default to save performance.")
+            (m/SizedBox .height 12)
+            (m/Row
+             .children [(m/Expanded
+                         .child (radio-list-tile
+                                 (m/Text "Yes")
+                                 true
+                                 start-expanded?
+                                 (fn [v]
+                                   (reset! *start-expanded? v)
+                                   (rd/dispatch [::model/update-user-options
+                                                 {"checked-lists-start-expanded" true}])
+                                   (rd/dispatch [::model/fetch-user-options]))))
+
+                        (m/Expanded
+                         .child (radio-list-tile
+                                 (m/Text "No")
+                                 false
+                                 start-expanded?
+                                 (fn [v]
+                                   (reset! *start-expanded? v)
+                                   (rd/dispatch [::model/update-user-options
+                                                 {"checked-lists-start-expanded" false}])
+                                   (rd/dispatch [::model/fetch-user-options]))))])]
+
+           [(m/SizedBox .height 24)
+            (m/Text "Sections start expanded" .style (.-titleMedium tthm))
+            (m/SizedBox .height 12)
+            (m/Text "Should sections be expanded by default when opening a note? 
+Default: Yes")
+            (m/SizedBox .height 12)
+            (m/Row
+             .children [(m/Expanded
+                         .child (radio-list-tile
+                                 (m/Text "Yes")
+                                 true
+                                 sections-start-expanded?
+                                 (fn [v]
+                                   (reset! *sections-start-expanded? v)
+                                   (rd/dispatch [::model/update-user-options
+                                                 {"sections-start-expanded" true}])
+                                   (rd/dispatch [::model/fetch-user-options]))))
+
+                        (m/Expanded
+                         .child (radio-list-tile
+                                 (m/Text "No")
+                                 false
+                                 sections-start-expanded?
+                                 (fn [v]
+                                   (reset! *sections-start-expanded? v)
+                                   (rd/dispatch [::model/update-user-options
+                                                 {"sections-start-expanded" false}])
+                                   (rd/dispatch [::model/fetch-user-options]))))])]
+
+           [(m/SizedBox .height 24)
+            (m/Text "User" .style (.-titleLarge tthm))]
+           (when (not anonymous?)
+             [(m/SizedBox .height 12)
+              (m/Text (if user?
+                        (str "Signed in as " (.-email user?) ", use this if other users want to share notes with you.")
+                        "<not signed in>"))
+
+              (m/SizedBox .height 12)
+              (settings-button
+               (m/Text "Copy email")
+               (fn []
+                 (when user?
+                   (.then (svc/Clipboard.setData (svc/ClipboardData
+                                                  .text
+                                                  (.-email user?)))
+                          (fn [_]
+                            nil)))
+                 nil))])
+
+           [(m/SizedBox .height 24)
+            (m/Text "User ID" .style (.-titleMedium tthm))
+            (m/SizedBox .height 12)
+            (m/Text "Include your ID when contacting support")
+            (m/SizedBox .height 12)
+            (m/Text (str uid))
+            (m/SizedBox .height 12)
+            (settings-button
+
+             (m/Text "Copy user id")
+             (fn []
+               (.then (svc/Clipboard.setData (svc/ClipboardData .text uid))
+                      (fn [_]
+                        nil))
+               nil))]
+           
+
+           [;; (m/Text "Select 12/24 hour clock. May require restart.")
+        ;; (m/Padding
+        ;;  .padding (m/EdgeInsets.symmetric .vertical 5.0))
+        ;; (m/DropdownMenu
+        ;;  .onSelected #(rd/dispatch [::model/update-user-options {"clock"
+        ;;  %}])
+        ;;  .initialSelection (or (prefs "clock") "24")
+        ;;  .dropdownMenuEntries
+        ;;  (map #(m/DropdownMenuEntry .label % .value %)
+        ;;       ["12" "24"]))
+            (m/SizedBox .height 24)
+            (m/Text "Support" .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)
+            (settings-button
+
+             (m/Text "Send an email")
+             (fn []
+               (url/launch (str "mailto:support@getdisorganized.com?subject=Support case for " uid))
+               nil))
+            (m/SizedBox .height 24)
+            (m/Text "Suggestion box" .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)]
+           [;; (settings-button
+
+            ;;  (m/Text "Facebook")
+            ;;  (fn []
+            ;;    (url/launch "https://www.facebook.com/profile.php?id=61573866543126")
+            ;;    nil))
+            (m/SizedBox .height 12)
+
+            (settings-button
+             (m/Text (str "Join the" " Discord"))
+             (fn []
+               (url/launch "https://discord.gg/UEeughB9Qn")
+               nil))
+            (m/SizedBox .height 12)
+            (settings-button
+             (m/Text "Send an email")
+             (fn []
+               (url/launch "mailto:support@getdisorganized.com?subject=Suggestion")
+               nil))]
+           (when (not kIsWeb)
+             [(m/SizedBox .height 24)
+              (m/Text "Open in store"
+                      .style (.-titleLarge tthm))
+              (m/SizedBox .height 12)
+              (m/Text "Check for updates, or why not leave a review?")
+              (m/SizedBox .height 12)
+              (settings-button
+               (m/Text "Open in store")
+
+               (fn []
+                 (let [rev (.instance review/InAppReview)]
+                   (.openStoreListing rev
+                                      .appStoreId "6738280174"))
+                 nil))])
+           [(m/SizedBox .height 24)
+            (m/Text "Subscription"
+                    .style (.-titleLarge tthm))]
+           (if premium?
+             [(m/SizedBox .height 12)
+              (m/Text "Premium is active"
+                      .style (.-titleMedium tthm))
+
+              (m/Text "Your support keeps the lights on. Thank you")]
+
+             [(m/SizedBox .height 12)
+              (m/Text "Premium"
+                      .style (.-titleMedium tthm))
+              (m/SizedBox .height 12)
+              (m/ElevatedButton
+
+               .onPressed (fn []
+                            (await (utils/paywall scaffold-messenger))
+                            nil)
+               .child (m/Text "Get Premium"))
+              (m/SizedBox .height 24)
+              (m/Text "Sync premium access" .style (.-titleMedium tthm))
+              (m/SizedBox .height 12)
+              (m/Text "If you have premium but you're missing access (maybe you are logged in with a new account?), press this button to sync premium. If it doesn't work, send an e-mail to support (see below).")
+              (m/SizedBox .height 8)
+              (m/ElevatedButton
+
+               .onPressed (fn []
+                            (let [active (await (model/restore-purchase))]
+
+                              (.showSnackBar scaffold-messenger
+                                             (m/SnackBar
+                                              .content
+                                              (m/Text
+                                               (if active
+                                                 (str "You now have access!")
+                                                 (str "No premium found, contact support."))))))
+                            nil)
+               .child (m/Text "Sync"))])
+           [(m/SizedBox .height 24)
+            (m/Text "Subscription details" .style (.-titleMedium tthm))
+            
+            (m/SizedBox .height 12)
+            (m/Text "Premium costs $3.99 per month converted to local currency where applicable.")
+            (m/SizedBox .height 12)
+            (settings-button
+             (m/Text "Privacy Policy")
+             (fn []
+               (url/launch "https://www.getdisorganized.com/privacy-policy")
+               nil))
+            (settings-button
+             (m/Text "Terms of Use/EULA")
+             (fn []
+               (if (and (not kIsWeb)
+                        Platform.isIOS)
+                 (url/launch "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")
+                 (url/launch "https://www.getdisorganized.com/eula"))
+               nil))
+            (m/SizedBox .height 24)]
+           (when (and user? password-provider?)
+             [(m/SizedBox .height 12)
+              (settings-button
+               (m/Text "Update email")
+               (fn []
+                 (let [email-sent? (await (update-email-popup ctx user?))
+                       desc (if email-sent? "Check your new email (and spam inbox) to validate your change."
+                                "Couldn't update email. Contact support@disorganized.com")]
+                   (.showSnackBar
+                    scaffold-messenger
+                    (m/SnackBar
+                     .content (m/Text desc))))
+                 nil))])
+
+           (when (or (not anonymous?) kDebugMode)
+             [(m/SizedBox .height 12)
+              (m/Text "Sign out" .style (.-titleLarge tthm))
+              (m/SizedBox .height 12)
+              (settings-button
+               (m/Text "Sign out")
+               (fn []
+                 (rd/dispatch [::model/empty-notes])
+                 (rd/dispatch [::model/set-user-options {}])
+                 (await (.signOut (.-instance FirebaseAuth)))
+
+                 (println "signed out!")))])
+
+           [(m/SizedBox .height 24)
+            (m/Text "Data/Account deletion" .style (.-titleLarge tthm))
+            (m/SizedBox .height 12)
+            (settings-button
+             (m/Text "DELETE ACCOUNT")
+             (fn []
+               (delete-account-dialog ctx)))
+            (m/SizedBox .height 24)])]
+    (m/Scaffold
+     .appBar (m/AppBar))
+    .body
+    m/SafeArea
+    (f/widget
+     :padding {:horizontal 20}
+     (m/ListView.builder
+      .itemCount (count children)
+      .itemBuilder (fn [_ i]
+                     (nth children i)))))))

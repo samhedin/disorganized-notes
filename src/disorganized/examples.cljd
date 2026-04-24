@@ -1,0 +1,153 @@
+(ns disorganized.examples
+  (:require [disorganized.model :as model :refer [uid]]
+            ["package:flutter/foundation.dart" :refer [kIsWeb]]
+            ["dart:io" :refer [Platform]]))
+
+(defn import []
+  {:id (str (random-uuid)),
+   :user_access [(uid)],
+   :updated_at (.add (DateTime.now)
+                     (Duration .seconds 1))
+   :import true
+   :title "Note import"
+   :plaintext
+   "Click below to import notes from other apps",
+   :user_emails {(uid) ""},
+   :created_at (.add (DateTime.now)
+                     (Duration .seconds 1)),
+   :roles {(uid) "owner"},
+   :owner (uid)
+   :tags []
+   :sections {}})
+
+(defn recipe []
+  (model/log-analytics "example_note" {"which" "recipe"})
+  (let [text-id (str (random-uuid))]
+    {:default true
+     :tutorial true
+     :clone-tutorial true
+     :sections (let [id1 (str (random-uuid))
+                     id2 (str (random-uuid))
+                     id3 (str (random-uuid))
+                     id4 (str (random-uuid))]
+
+                 {id1 {"columns" [{"name" "Name", "cid" "0c10ce98-6f73-4ba1-bac9-814f6f5dcde1"} {"name" "Amount", "cid" "2dcddec5-d7d5-453e-b332-a5bde43587f4"}]
+                       , "section-position" 0, "id" id1, "name" "Ingredients", "content" [{"id" "bcb102b2-84de-4c14-abd2-2ed10539da17", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Olive oil", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "3 tbsp"}} {"id" "b429d9ac-d3d2-46cd-b990-8c58b77fe2f9", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Onion", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "1 chopped"}} {"id" "e195b162-a89f-4b3b-baaf-827b98c94e14", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Tomato puree", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "1 tbsp"}} {"id" "0c830469-c4b4-4ed9-9762-21928723f818", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Tomato", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "1 large, chopped"}} {"id" "94779614-a50a-4090-bd66-54c8af7e4120", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "(Chili) peppers", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "2, chopped"}} {"id" "2f0a4e86-855b-4a60-bb29-df9fdf5e4bc5", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Bulgur", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "200-250 g"}} {"id" "de1df7ea-8c23-4084-aaa4-381421da0469", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Vegetable/chicken stock", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "550 ml/ 2.3 cups"}} {"id" "231980b7-b88d-4160-8730-0fb4023ac117", "data" {"0c10ce98-6f73-4ba1-bac9-814f6f5dcde1" "Chickpeas", "2dcddec5-d7d5-453e-b332-a5bde43587f4" "1 can"}}], "type" "table2"}
+
+                  id2 {"section-position" 1, "id" id2, "name" "Instructions", "content" "1. Heat the oil and saute the onions and chickpeas on medium heat.\n2. Once the onion is soft, add the tomato and tomato puree.\n3. Cook for another minute then stir in the bulgur\n4. Pour the over the stock and set to low heat.\nLeave for 15 minutes (timer below)", "type" "text"}
+
+                  , id3 {"section-position" 2, "id" id3, "name" "Cooking time", "content" {"hours" 0, "minutes" 15, "seconds" 0}, "type" "timer", "description" "Start after adding the bulgur and stock"}
+
+                  , id4 {"section-position" 3, "id" id4, "name" "Final instructions", "content" "After cooking, let rest for a few minutes and then serve with Crème fraiche.", "type" "text"}}), :tags ["recipe"], :id (str (random-uuid)), :user_access [(uid)], :updated_at (.add (DateTime.now) (Duration .seconds 2))
+     :created_at (DateTime.now),  , :title "Bulgur recipe"
+
+     :plaintext "Every note is a template!
+
+This recipe has a table of ingredients, a timer, and more.
+To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :owner (uid)}))
+
+(defn meeting []
+  (let [text-id (str (random-uuid))]
+    {:default true
+     :tutorial true
+     :sections (let [id1 (str (random-uuid))
+                     id2 (str (random-uuid))
+                     id3 (str (random-uuid))
+                     id4 (str (random-uuid))]
+
+                 {}), :tags ["meeting"], :id (str (random-uuid)), :user_access [(uid)], :updated_at (.add (DateTime.now) (Duration .seconds 2))
+     :created_at (DateTime.now),  , :title "Meeting with "
+
+     :plaintext "", :roles {(uid) "owner"}, :owner (uid)}))
+
+(defn groceries []
+  (model/log-analytics "example_note" {"which" "groceries"})
+  {:id (str (random-uuid)),
+   :user_access [(uid)],
+   :updated_at (.subtract (DateTime.now)
+                     (Duration .minutes 4))
+   :tutorial true
+   :title "Shopping list",
+   :clone-tutorial true
+
+   :plaintext ""
+   :user_emails {(uid) ""},
+   :created_at (.subtract (DateTime.now)
+                     (Duration .minutes 5)),
+   :pin (DateTime.now)
+   :roles {(uid) "owner"},
+   :owner (uid)
+   :tags []
+   :sections (let [id (str (random-uuid))]
+               {id {"checkboxes-visible" true, "section-position" 0, "id" id, "name" "Groceries", "content" [{"children" [{"id" "6b4ce502-da45-4c39-9d48-ac57263d70ec", "checkbox" false, "data" "Olive oil"} {"id" "795ebbcb-aee8-4f99-a46a-52bae16a5985", "checkbox" false, "data" "Chickpeas"}], "id" "eb8d8a51-cfd3-4d25-b919-f86d4894ca9a", "data" "Hummus"} {"children" [{"id" "4ea68d6c-9e1c-4395-866a-0196ec301cbc", "checkbox" false, "data" "Toothpaste"}], "id" "6d4d4af9-50ab-4e2d-8ed9-e11b9e6393eb", "checkbox" false, "data" "Hygiene"}], "type" "list", "checked-content" []}})})
+
+(defn todo []
+  (model/log-analytics "example_note" {"which" "todo"})
+  {:id (str (random-uuid)),
+   :user_access [(uid)],
+   :updated_at (.subtract (DateTime.now)
+                     (Duration .minutes 4))
+   :tutorial true
+   :title "Todo",
+   :plaintext "A few things to try in the app!"
+   :user_emails {(uid) ""},
+   :created_at (.subtract (DateTime.now)
+                     (Duration .minutes 5)),
+   :pin (DateTime.now)
+   :roles {(uid) "owner"},
+   :owner (uid)
+   :tags ["todo"]
+   :sections (let [id (str (random-uuid))]
+               {id {"checkboxes-visible" true, "section-position" 0, "id" id, "name" "Todo", "content"
+                    [{"id" "795ebbcb-aee8-4f99-a46a-52bae16a5985", "checkbox" false, "data" "Test the ai-generate table feature"
+                      "children"
+                      [{"id" (str (random-uuid))
+                        "data" "Access via the Section button"}]}
+
+                     {"children" [],
+                      "id" "eb8d8a51-cfd3-4d25-b919-f86d4894ca9a", "data" "Use the media/draw section to make a stick figure"}
+                     {"children" [],
+                      "id" (str (random-uuid)), "data" "Upload some memories with the Media section"}], "type" "list", "checked-content" []}})})
+
+(defn workout []
+  (model/log-analytics "example_note" {"which" "workout"})
+  {:id (str (random-uuid)),
+   :user_access [(uid)],
+   :updated_at (.subtract (DateTime.now)
+                     (Duration .minutes 4))
+   :clone-tutorial true
+
+   :title "Full body gym workout",
+   :plaintext "This is an example workout note. For future workouts, clone this note to reuse the table of exercises."
+   :user_emails {(uid) ""},
+   :tutorial true
+   :created_at (.subtract (DateTime.now)
+                     (Duration .minutes 5)),
+   :roles {(uid) "owner"},
+   :owner (uid)
+   :tags ["workout" "full-body"]
+   :sections (let [id (str (random-uuid))]
+               {id {"columns" [{"name" "Name", "cid" "bbbada73-9365-4b74-9cc5-17eb395749d9"} {"name" "Repetitions", "cid" "315f8ded-6a5a-4906-b75d-0ac9ef79d0b1"} {"name" "Weight", "cid" "ec217dd5-f9cb-4d89-86fe-e4fe18220d15"}], "section-position" 0, "id" id, "name" "Exercises", "content" [{"id" "ff90f563-4a2d-444a-b4eb-fd6337703810", "data" {"315f8ded-6a5a-4906-b75d-0ac9ef79d0b1" "12, 10, 8", "bbbada73-9365-4b74-9cc5-17eb395749d9" "Dumbbell chest press", "ec217dd5-f9cb-4d89-86fe-e4fe18220d15" "-"}} {"id" "3c1f7dfb-9892-4134-a11b-c1ef8adeae10", "data" {"315f8ded-6a5a-4906-b75d-0ac9ef79d0b1" "10, 8", "bbbada73-9365-4b74-9cc5-17eb395749d9" "Leg press", "ec217dd5-f9cb-4d89-86fe-e4fe18220d15" "-"}} {"id" "0cfd524e-45e7-4a99-bf87-dfe4a36df98e", "data" {"315f8ded-6a5a-4906-b75d-0ac9ef79d0b1" "6, 4, 3", "bbbada73-9365-4b74-9cc5-17eb395749d9" "Deadlift", "ec217dd5-f9cb-4d89-86fe-e4fe18220d15" "-"}} {"id" "556206af-dd17-4e41-a7e9-e0439106e77d", "data" {"315f8ded-6a5a-4906-b75d-0ac9ef79d0b1" "12, 10, 8", "bbbada73-9365-4b74-9cc5-17eb395749d9" "Assisted pullup", "ec217dd5-f9cb-4d89-86fe-e4fe18220d15" "-"}}], "type" "table2"}})})
+
+;; (defn love-letter []
+;;   {:id (str (random-uuid)),
+;;     :user_access [(uid)],
+;;     :updated_at (.add (DateTime.now)
+;;                       (Duration .seconds 1))
+;;    :title "To whom it may concern"
+;;    :plaintext "I'm not sure why I decided to give it my all to make a note-taking app, but getting to work on something so ordinary is incredibly satisfying to me.
+
+;; I hope that you enjoy my little app, and if you ever have feedback I'm never further away than sam@getdisorganized.com or a ping in https://discord.gg/UEeughB9Qn
+
+;; Thank you for giving me the chance to work on something I love.
+
+;; PS: Check out the cloning tutorial in the example notes when you have time.
+
+;; -- Sam",
+;;     :user_emails {(uid) ""},
+;;     :created_at (.add (DateTime.now)
+;;                       (Duration .seconds 1)),
+;;    :roles {(uid) "owner"},
+;;     :owner (uid)
+;;     :tags []
+;;     :sections {}})

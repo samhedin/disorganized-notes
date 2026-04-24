@@ -1,0 +1,371 @@
+(ns disorganized.ui.login
+  (:require
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   [disorganized.examples :as ex]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.tutorial :as tutorial]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["package:firebase_auth/firebase_auth.dart" :as firebase-auth :refer [FirebaseAuth]]
+   ["package:google_sign_in/google_sign_in.dart" :refer [GoogleSignIn]]
+   ["dart:io" :refer [Platform]]
+
+   ["package:firebase_auth/firebase_auth.dart" :as auth]
+   ["package:firebase_ui_oauth_google/firebase_ui_oauth_google.dart" :refer [GoogleProvider]]
+   ["package:firebase_ui_oauth_apple/firebase_ui_oauth_apple.dart" :refer [AppleProvider]]
+   ["package:firebase_ui_auth/firebase_ui_auth.dart" :as uia :refer [EmailAuthProvider AuthAction]]
+   ["package:disorganized_notes/providers.dart" :refer [CAppleProvider CGoogleProvider CEmailAuthProvider]]
+   [disorganized.ui.theme :as theme]
+   ["package:purchases_ui_flutter/purchases_ui_flutter.dart" :as rcu]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:purchases_flutter/purchases_flutter.dart" :refer [Purchases]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   ["package:disorganized_notes/firestore_db.dart" :as fdb]
+   ["package:flutter/material.dart" :as m]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:intl/intl.dart" :as intl]
+   [cljd.flutter :as f]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.date :as date]
+   [disorganized.ui.popup :as popup]
+   [disorganized.model :as utils]
+   [hti.re-dash.alpha :as rd]))
+
+(defn checked-text [text]
+  (m/Row
+   .children [(m/Checkbox
+               .value true
+               .onChanged (fn [_])
+               .activeColor m/Colors.green)
+              (f/widget
+                 :get {{tthm .-textTheme} m/Theme}
+                 m/Expanded
+                 (m/Text text
+                         .style (.-titleLarge tthm)))]))
+
+(defn web-notice []
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   (m/Center
+    .child
+    (m/Card
+     .elevation 0
+     .child
+     (m/SizedBox
+      .width 350
+      .child 
+      (f/widget
+       :padding {:vertical 8}
+       (m/Column
+        .mainAxisSize m/MainAxisSize.min
+        .mainAxisAlignment m/MainAxisAlignment.center
+        .children
+        [(m/Text "Premium required for web!"
+                 .style (.-titleLarge tthm))
+         (m/SizedBox .height 8)
+         (m/Text "Get premium via one of the mobile apps
+then sign in with the same account.")
+         (m/SizedBox .height 8)
+         (m/Row
+          .mainAxisAlignment m/MainAxisAlignment.center
+          .children
+          [(m/OutlinedButton
+            .child (m/Text "iOS app")
+            .onPressed (fn []
+                         (url/launch "https://apps.apple.com/us/app/disorganized-notes-todo/id6738280174")
+                         nil))
+           (m/SizedBox .width 12)
+           (m/OutlinedButton
+            .child (m/Text "Android app")
+            .onPressed (fn []
+                         (url/launch "https://play.google.com/store/apps/details?id=com.disorganized.disorganized&pli=1&gl=cn")
+                         nil))])])))))))
+
+(defn redirect [ctx]
+  (-> ctx
+      go_router/GoRouterHelper
+      (.go
+       "/"))
+  nil)
+
+(defn redirect-to-first-note [ctx]
+  (println "redirecting")
+  (let [note (utils/init-new-note)]
+    (rd/dispatch [::model/upload-note  [note true]])
+    (utils/log-analytics "note_created")
+    (utils/log-analytics "first_note_created")
+    (rd/dispatch [::model/set-new-plaintext ""])
+    (rd/dispatch [::model/set-key :override-title ""])
+    (rd/dispatch [::model/set-key :focus-plaintext? true])
+    (-> ctx
+        go_router/GoRouterHelper
+        (.go
+         "/"))
+
+    (-> ctx go_router/GoRouterHelper
+        (.pushNamed "edit"
+                    .pathParameters {"id" (:id note)}
+                    .extra {:autofocus true
+                            :first-launch? true}))
+    nil))
+
+
+(def ^m/Widget build-first-note
+  (f/build
+   [^go_router/GoRouterState router-state]
+   (m/Scaffold
+    .body
+    (f/widget
+     :watch [prefs (rd/subscribe [::model/get-user-options])]
+     :get {{tthm .-textTheme} m/Theme}
+     :get [m/ScaffoldMessenger]
+     :context ctx
+     :padding {:top 24
+               :horizontal 24}
+     :watch [brightness (rd/subscribe [::model/get-brightness])
+             selected-notes (atom #{}) :as *selected-notes]
+     :let [uid? (model/uid)]
+     :bg-watcher ([{uid .-uid} (.authStateChanges FirebaseAuth.instance)]
+
+                  
+                  (when uid
+                    (-> ctx
+                        go_router/GoRouterHelper
+                        (.go
+                         "/"))))
+     m/SafeArea
+     m/Column
+     .children
+     (concat
+      [(m/SizedBox .height 24)
+       (m/Center
+        .child (m/Text "Tutorial"
+                       .style (.-headlineLarge tthm)))
+
+       (f/widget
+        :padding {:top 20}
+        m/Center
+        (m/Column
+         .children
+         [(m/SizedBox .height 12)
+          (checked-text "How to write notes")
+          (checked-text "How to organize notes")
+          (checked-text "How to reuse content")
+
+          (f/widget
+           :padding {:top 24}
+           (m/ElevatedButton
+            .onPressed (fn []
+                         (do
+                             (await (FirebaseAuth.instance.signInAnonymously))
+                             (user-created nil)
+
+                             (redirect-to-first-note ctx)))
+
+            .child (f/widget
+                    :padding {:horizontal 12
+                              :vertical 12}
+                    (m/Text "Continue"
+                            .style (.-titleLarge tthm)))))]))
+
+       (m/Spacer)
+       (f/widget
+        :padding {:bottom 20}
+        (m/Align
+         .alignment m/Alignment.bottomLeft)
+        (m/ElevatedButton
+         .onPressed
+         (fn []
+           (-> ctx go_router/GoRouterHelper
+               (.go
+                "/login"))
+           nil)
+         .child (m/Text "I've used this app before")))])))))
+
+
+
+(defn anonymous []
+  (f/widget
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [clicked? (atom false) :as *clicked?]
+   :get [m/Navigator]
+   (m/AnimatedSwitcher
+    .duration (Duration .milliseconds 300)
+    .child
+    (if clicked?
+      (m/Container
+       .width 200
+       .child (m/LinearProgressIndicator))
+      (m/Row
+       .children
+       [(m/Expanded
+         .child (f/widget
+                 :padding {:horizontal 20}
+                 (m/ElevatedButton.icon
+                  .icon (m/Icon m/Icons.fast_forward
+                                .size 30)
+
+                  .label
+                  (f/widget
+                   :padding {:vertical 10}
+                   (m/Text "Skip registration"
+                           .style (.-titleLarge tthm)))
+
+                  .onPressed (fn []
+                               (reset! *clicked? true)
+                               (await (FirebaseAuth.instance.signInAnonymously))
+                               (user-created nil)
+                               (redirect ctx)
+
+                               nil))))])))))
+
+(defn register-sign-up []
+  (f/widget
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   (m/Row
+    .children
+    [(m/Expanded
+      .child (f/widget
+              :padding {:horizontal 20}
+              (m/ElevatedButton.icon
+               .icon (m/Icon m/Icons.login)
+               .label
+               (f/widget
+                :padding {:vertical 10}
+                (m/Text "Sign in/Register"))
+
+               .onPressed (fn []
+                            (-> ctx go_router/GoRouterHelper
+                                (.go
+                                 "/login"))
+                            nil))))])))
+
+(defn user-created [prefs]
+  (rd/dispatch [::model/update-user-options {"registered_at" (DateTime.now)}])
+  (rd/dispatch [::model/update-user-options (or prefs {})])
+  (utils/log-analytics "user_created"))
+
+(def ^m/Widget login
+  (f/build
+   [^go_router/GoRouterState router-state]
+   (m/Scaffold
+    .appBar (m/AppBar)
+    .body
+    (f/widget
+     :watch [prefs (rd/subscribe [::model/get-user-options])]
+     :get {{tthm .-textTheme} m/Theme}
+     :get [m/ScaffoldMessenger m/Navigator]
+     :let [uid? (model/uid)]
+     :context ctx
+     ;; :bg-watcher ([{uid .-uid} (.authStateChanges FirebaseAuth.instance)]
+     ;;              (when uid
+     ;;                     (rd/dispatch [::model/refresh-notes])
+     ;;                     (rd/dispatch [::model/fetch-user-options])
+     ;;                     (await (model/init-revenuecat- uid))
+
+     ;;                (-> ctx go_router/GoRouterHelper
+     ;;                    (.goNamed "root"))))
+
+     (if (not uid?)
+       (uia/SignInScreen
+        .sideBuilder (fn [_ _]
+                       (f/widget
+                        :get {{tthm .-textTheme} m/Theme}
+
+                        (if (or kDebugMode (not kIsWeb))
+                          (m/ConstrainedBox
+                           .constraints
+                           (m/BoxConstraints
+                            .maxWidth 200
+                            .maxHeight 200)
+                           .child (anonymous))
+
+                          (web-notice))))
+
+        .headerBuilder
+        (fn [_ _ _]
+          (if (or kDebugMode (not kIsWeb))
+            (f/widget
+             :padding {:top 30}
+             :get {{tthm .-textTheme} m/Theme}
+
+             (m/Column
+              .children
+              [(anonymous)]))
+
+            (web-notice)))
+
+        .footerBuilder
+        (fn
+          [_ _]
+          (m/Column
+           .children
+           [(m/Text "Create an account to back up and sync your notes between devices."
+                    .style (.-bodyLarge tthm))]))
+
+        .providers (concat [(uia/EmailAuthProvider)
+                            (GoogleProvider
+                             .clientId
+                             (if (and (not kIsWeb)
+                                      Platform.isIOS)
+                               "989769042149-46c4m1b144k01fdav1lf49h7redkc2gc.apps.googleusercontent.com"
+                               "989769042149-e3onm9bvou4g08c8b9s6lu8h7341ro8b.apps.googleusercontent.com"))]
+                           (when (or kIsWeb Platform.isIOS)
+                             [(AppleProvider)]))
+        .actions
+        [(#/(uia/AuthStateChangeAction uia/UserCreated)
+          (fn [context state]
+            (user-created prefs)
+            (redirect context)
+
+            nil))
+
+         (#/(uia/AuthStateChangeAction uia/CredentialLinked)
+          (fn [context state]
+            (await (utils/init-revenuecat- (model/uid)))
+            (redirect  ctx)))
+
+         (#/(uia/AuthStateChangeAction uia/SignedIn)
+          (fn [context state]
+            (redirect  ctx)))]
+
+        .showPasswordVisibilityToggle true)
+
+       (uia/SignInScreen
+        .footerBuilder
+        (fn
+          [_ _]
+          (m/Column
+           .children
+           [(m/Text "Create an account to back up and sync your notes between devices."
+                    .style (.-bodyLarge tthm))]))
+
+        .providers (concat [(uia/EmailAuthProvider)
+                            (GoogleProvider
+                             .clientId
+                             (if (and (not kIsWeb)
+                                      Platform.isIOS)
+                               "989769042149-46c4m1b144k01fdav1lf49h7redkc2gc.apps.googleusercontent.com"
+                               "989769042149-e3onm9bvou4g08c8b9s6lu8h7341ro8b.apps.googleusercontent.com"))]
+                           (when (or kIsWeb Platform.isIOS)
+                             [(AppleProvider)]))
+        .actions
+        [(#/(uia/AuthStateChangeAction uia/UserCreated)
+          (fn [context state]
+            (user-created prefs)
+            (redirect-to-first-note ctx)))
+
+         (#/(uia/AuthStateChangeAction uia/CredentialLinked)
+          (fn [context state]
+            (await (utils/init-revenuecat- (model/uid)))
+            (redirect ctx)))
+
+         (#/(uia/AuthStateChangeAction uia/SignedIn)
+          (fn [context state]
+            (redirect ctx)))]
+
+        .showPasswordVisibilityToggle true))))))
+

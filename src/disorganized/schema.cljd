@@ -1,0 +1,50 @@
+(ns disorganized.schema)
+
+(def sections                                                                                                                                                                       
+     [:multi {:dispatch "type"}
+      ["text"     [:map {:open true}
+                   ["type" string?] ["content" string?]]]
+
+      ["table" [:map {:open true}
+                ["type" string?]]]
+      ["media" [:map {:open true}
+                ["type" string?]]]
+      
+      ["list" [:map {:open true}                                                                                                                                                                
+               ["type" string?]                                                                                                                                                                 
+               ["content" [:vector some?]]                                                                                                                                                      
+               ["checked-content" {:required false} [:vector some?]]]]                                                                                                                                            
+                                                                                                                                    
+      ["table2"   [:map {:open true}
+                   ["type" string?]
+                   ["columns" coll?]
+                   ["content" coll?]]]                                                                                              
+      ["voice"    [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["media2"   [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["draw2"    [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["reminder" [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["timer"    [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["location" [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                     
+      ["alarm"    [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]                                                                                                                   
+      ["mindmap"  [:map {:open true}
+                   ["type" string?]
+                   ["content" map?]]]])
+
+(def note
+  [:map 
+   [:id {:required true} string?]
+   [:sections [:map-of string? sections]]])

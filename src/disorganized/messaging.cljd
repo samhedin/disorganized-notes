@@ -1,0 +1,195 @@
+(ns disorganized.messaging
+  (:require
+   ["package:disorganized_notes/firestore_db.dart" :as fdb]
+   ["dart:io" :refer [Platform]]
+   [hti.re-dash.alpha :as rd]
+   ["dart:convert" :as c]
+   [clojure.string :as string]
+   ["package:flutter/material.dart" :as m]
+   ["package:eraser/eraser.dart" :refer [Eraser]]
+   ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
+   ["package:awesome_notifications_fcm/awesome_notifications_fcm.dart" :refer [AwesomeNotificationsFcm FcmSilentData]]
+   [disorganized.model :as model]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions]]
+   ["dart:io" :refer [Platform]]))
+
+(defn postpone-notification [duration
+                             {:strs [section-id note-id description] :as m}]
+  (let [tz (await (.getLocalTimeZoneIdentifier
+                   (notif/AwesomeNotifications)))]
+    (await
+     (.createNotification
+      (notif/AwesomeNotifications)
+
+      .content
+      (notif/NotificationContent
+       .id 0
+       .channelKey "reminder_channel"
+       .title (model/safe-substring description 0 10)
+       .body (model/safe-substring description 0 100)
+       .payload m
+       .wakeUpScreen true
+       .category notif/NotificationCategory.Alarm)
+
+      .actionButtons [(notif/NotificationActionButton
+                       .showInCompactView true
+                       .actionType notif/ActionType.SilentAction
+
+                       .key "finish"
+                       .label "Finish")
+                      (notif/NotificationActionButton
+                       .showInCompactView true
+                       .actionType notif/ActionType.SilentAction
+
+                       .key "postpone-30"
+                       .label "Delay 30 min")
+                      (notif/NotificationActionButton
+                       .showInCompactView true
+                       .actionType notif/ActionType.SilentAction
+
+                       .key "postpone-60"
+                       .label "Delay 60 min")]
+
+      .schedule
+      (notif/NotificationInterval.new
+       .timeZone tz
+       .interval duration
+       .allowWhileIdle true
+       .preciseAlarm true)))))
+
+(defn new-todo-note []
+  (let [note (model/init-new-note)
+        list-section (model/default-section-map "list" 0 "todo")]
+
+    (rd/dispatch [::model/upload-note  [(assoc note
+                                               :sections {(list-section "id")
+                                                          list-section}
+                                               :title "Todo this week"
+                                               :tags ["todo"])
+
+                                        true]])
+    (model/log-analytics "note_created")
+    (rd/dispatch [::model/set-current-note-id (:id note)])))
+
+(defn exec-reminder-action [action {:strs [section-id note-id description] :as m}]
+  (case action
+    "postpone-30" (await (postpone-notification  (Duration .minutes 30) m))
+    "postpone-60" (await (postpone-notification  (Duration .minutes 60) m))
+
+    "finish" (let [db (fdb/FirestoreDB)
+                   note' (await (.getNoteById db note-id))
+                   note (model/dart->clj-ds note')
+
+                   ;;first first is because (note "sections") is a map
+                   ;;which results in [section-name,section] after the filter.
+                   section-name (first (first (filter
+                                               (fn [[_ section]]
+                                                 (= section-id (section "id")))
+                                               (note "sections"))))
+
+                   ff  FirebaseFirestore.instance
+                   ref (.doc (.collection ff "notes2")
+                             note-id)]
+
+               (.set ref
+                     (assoc-in note
+                               ["sections" section-name "content" "finished"]
+                               true)))))
+
+;; ^{:annotations [^:unique (pragma "vm:entry-point")]}
+;; (defn  ^#/(Future void) on-notification-received [notification]
+;;   nil)
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn  ^#/(Future void) on-notification-displayed [notification]
+  (println "notification displayed "))
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn  ^#/(Future void) on-dismiss-action-received [notification]
+  ;; (let [payload (model/dart->clj-ds (.-payload notification))
+  ;;       m {"note-id" (payload "note_id")
+  ;;          "section-id" (payload "section_id")
+  ;;          "description" (payload "description")}]
+
+  ;;   (rd/dispatch [::model/update-current-note
+  ;;                 #(assoc-in % [:sections (m "section-id") "content" "finished"] true)]))
+  (println "dismissed " )
+  )
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn  ^#/(Future void) on-action-received [notification]
+  (println "action received" (.-buttonKeyPressed notification) (.-actionType notification))
+  (let [action (.-buttonKeyPressed notification)
+        action-type (.-actionType notification)
+        payload (model/dart->clj-ds (.-payload notification))
+        m {"note-id" (payload "note_id")
+           "section-id" (payload "section_id")
+           "description" (payload "description")}]
+
+    (cond
+      (= "new_todo_note" (payload "action_type")) (new-todo-note)
+
+      :else (if (not (string/blank? action)) ;;old stuff deal with like this
+              (await (exec-reminder-action action m))
+              (rd/dispatch [::model/set-current-note-id (payload "note_id")])))))
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn  ^#/(Future void) fcm-token-handler [token]
+  (println "received fcm token" (some? token))
+  (let [uid (model/uid)
+        device-ref (.doc (FirebaseFirestore.instance.collection "devices")
+                         uid)
+        tokens {"tokens"
+                {token {"createdAt" (DateTime.now)
+                        "lastUsed" (DateTime.now)
+                        "isActive" true}}}]
+
+    (await (.set device-ref
+                 tokens
+                 (SetOptions .merge true)))))
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn  ^#/(Future void) background-handler [^FcmSilentData silentdata]
+  (println "notification data " silentdata)
+  (await (Future.delayed (Duration .milliseconds 300))))
+
+(defn ^#/(Future bool) initialize-remote-notifications []
+  (await (.initialize
+          (AwesomeNotificationsFcm)
+          .onFcmSilentDataHandle background-handler
+          .onFcmTokenHandle fcm-token-handler
+          .licenseKeys ["REMOVED"
+                        "REMOVED"])))
+
+(defn initialize []
+  (.initialize (notif/AwesomeNotifications)
+               "resource://drawable/do_logo"
+               (into []
+                     (concat
+                      [(notif/NotificationChannel
+                        .channelGroupKey "reminder_channel_group"
+                        .channelKey "reminder_channel"
+                        .channelName "Reminders"
+                        .channelDescription "Reminders from the app!")
+
+                       (notif/NotificationChannel
+                        .channelGroupKey "habit_channel_group"
+                        .channelKey "habit_channel"
+                        .channelName "Habit forming channel"
+                        .channelDescription "Get in the note-taking habit!")]
+
+                      (when (= "true" (model/remote-conf "memories"))
+                        [(notif/NotificationChannel
+                          .channelGroupKey "memory_channel_group"
+                          .channelKey "memory_channel"
+                          .channelName "Memories"
+                          .channelDescription "Remembering notes you wrote in the past")]))))
+
+  (.setListeners (notif/AwesomeNotifications)
+                 .onActionReceivedMethod on-action-received
+                 ;.onNotificationCreatedMethod on-notification-received
+                 .onNotificationDisplayedMethod on-notification-displayed
+                 .onDismissActionReceivedMethod on-dismiss-action-received)
+
+  (await (initialize-remote-notifications)))

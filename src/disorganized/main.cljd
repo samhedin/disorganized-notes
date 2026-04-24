@@ -1,0 +1,712 @@
+(ns disorganized.main
+  (:require
+   ["package:cryptography_flutter_plus/cryptography_flutter_plus.dart" :as crf :refer [FlutterAesGcm FlutterCryptography FlutterPbkdf2]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   [disorganized.ui.mindmap :refer [mindmap]]
+   ["package:circular_countdown_timer/circular_countdown_timer.dart" :as ct]
+   ["package:firebase_auth/firebase_auth.dart" :refer [FirebaseAuth]]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.tutorial :as tutorial]
+   ["package:firebase_app_check/firebase_app_check.dart" :refer [FirebaseAppCheck AndroidProvider AppleProvider ReCaptchaV3Provider]]
+   ["package:disorganized_notes/firestore_db.dart" :as fdb]
+   ["package:alarm/alarm.dart" :as alarm]
+   [disorganized.ui.media2 :as media2]
+   ["package:flutter_sharing_intent/flutter_sharing_intent.dart" :as sharing-intent]
+   ["package:flutter_sharing_intent/model/sharing_file.dart" :refer [SharedMediaType]]
+   ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
+   ["package:firebase_remote_config/firebase_remote_config.dart" :as frc]
+   ["package:flutter_timezone/flutter_timezone.dart" :refer [FlutterTimezone]]
+   ["package:eraser/eraser.dart" :refer [Eraser]]
+   ["package:timezone/timezone.dart" :as tzd]
+   ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+   [cljd.reader :as reader]
+   ["package:disorganized_notes/timezone_initializer.dart" :as tz]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   
+   [clojure.walk :as w]
+   ["dart:core" :refer [Uri]]
+   [clojure.set :refer [rename-keys]]
+   [disorganized.messaging :as messaging]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions Settings FieldPath]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["dart:ui" :refer [Locale]]
+   ["package:disorganized_notes/firebase_options.dart" :as options]
+   ["package:flutter_app_badge_control/flutter_app_badge_control.dart" :refer [FlutterAppBadgeControl]]
+   [disorganized.ui.verify-email :refer [verify-email]]
+   [disorganized.ui.popup :as popup]
+   ["dart:io" :refer [Platform]]
+   ["dart:convert" :as c]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   ["package:home_widget/home_widget.dart" :as hw]
+   ["package:firebase_analytics/firebase_analytics.dart" :refer [FirebaseAnalytics]]
+   ["package:firebase_core/firebase_core.dart" :as firebase]
+   ["package:flutter/material.dart" :as m]
+   ["package:flutter/painting.dart" :as p]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   ["package:go_router/go_router.dart" :as go_router :refer [GoRouter GoRoute GoRouterState GoRouterHelper]]
+   ["package:shared_preferences/shared_preferences.dart" :as sp]
+   [cljd.flutter :as f]
+   [disorganized.ui.login :refer [login build-first-note]]
+   [disorganized.model :as model]
+   [disorganized.ui.edit :as edit]
+   [disorganized.ui.misc :as misc]
+   [disorganized.ui.image-carousel :refer [carousel]]
+   [disorganized.ui.image-carousel2 :refer [carousel2 image-painter]]
+   [disorganized.ui.reminders :as reminders]
+   [disorganized.ui.read :as read]
+   [disorganized.ui.settings :as settings]
+   [disorganized.ui.theme :as dt]
+   ["package:flutter/services.dart" :as svc]
+   [disorganized.model :as utils]
+   [hti.re-dash.alpha :as rd]
+   [clojure.string :as string]))
+
+(defn init-appcheck []
+  ;;Split test activating this one!!!
+
+  (FirebaseAppCheck.instance.activate
+   .webProvider (ReCaptchaV3Provider "6LenbVQrAAAAAJJU1A6p-emj5yY1Se6I3MQxuZOP")
+   .appleProvider AppleProvider.appAttest
+   .androidProvider (if kDebugMode
+                      AndroidProvider.debug
+                      AndroidProvider.playIntegrity)))
+
+(defn init-analytics []
+  (println "init-analytics")
+  (.setConsent FirebaseAnalytics.instance
+               .adStorageConsentGranted false
+               .analyticsStorageConsentGranted true
+               .adPersonalizationSignalsConsentGranted false
+               .adUserDataConsentGranted false
+               .functionalityStorageConsentGranted true
+               .personalizationStorageConsentGranted false
+               .securityStorageConsentGranted true))
+
+(defn init-remote-config []
+  (let [rc frc/FirebaseRemoteConfig.instance]
+    (.then (.setConfigSettings rc
+                               (frc/RemoteConfigSettings
+                                .fetchTimeout (Duration .minutes 1)
+                                .minimumFetchInterval
+                                (Duration .hours 1)))
+           (fn [_]
+             (.then (.setDefaults
+                     rc
+                     {"use_appcheck" "false"})
+                    (fn [_]
+                      (println "activating rc")
+                      (.fetchAndActivate rc)))))))
+
+(defn add-brightness-observer []
+  ;;This makes sure we're notified when the device switches between dark/light mode
+  (.addObserver f_widgets/WidgetsBinding.instance
+                (reify :extends f_widgets/WidgetsBindingObserver
+
+                  (didChangePlatformBrightness
+                    [_]
+                    (rd/dispatch [::model/set-brightness (m/WidgetsBinding.instance.platformDispatcher.-platformBrightness)])
+                    nil))))
+
+(defn sharing-intent-images [values  scaffold-messenger]
+  (println "received sharing intent " values)
+  (let [section-map (model/default-section-map "media2" 0 "shared")
+        id (section-map "id")
+        note (update (utils/init-new-note)
+                     :sections #(assoc % id section-map))
+        files (mapv #(XFile %) values)]
+    (println "sharing-intent-images " values files)
+    (rd/dispatch [::model/upload-note [note true]])
+    (rd/dispatch [::model/set-current-note-id (:id note)])
+    (await (media2/upload id "images" files))))
+
+(defn sharing-intent-other [values  scaffold-messenger]
+  (println "received sharing intent " values)
+  (let [section-map (model/default-section-map "media2" 0 "shared")
+        id (section-map "id")
+        note (update (utils/init-new-note)
+                     :sections #(assoc % id section-map))
+        files (mapv #(XFile %) values)]
+
+    (rd/dispatch [::model/upload-note [note true]])
+    (rd/dispatch [::model/set-current-note-id (:id note)])
+    (await (media2/upload id "other" files))))
+
+(defn sharing-intent-text [text]
+  (println "shared text " text)
+  (if (and (string/includes? text "disorganized")
+           (string/includes? text "openNote"))
+    (let [id (second (string/split text #"="))]
+
+      (println "found note " id)
+      (rd/dispatch [::model/set-current-note-id id]))
+
+    (let [note (assoc (utils/init-new-note)
+                      :plaintext (str text))]
+
+      (rd/dispatch [::model/upload-note [note true]])
+      (rd/dispatch [::model/set-current-note-id (:id note)]))))
+
+(defn handle-shared [shared scaffold-messenger]
+  (when (seq shared)
+    (let [type (.-type (first shared))
+          values (.map shared (fn [x]
+                                (.-value x)))]
+      (cond
+        (= type SharedMediaType.URL) (mapv sharing-intent-text values)
+        (= type SharedMediaType.TEXT) (mapv sharing-intent-text values)
+        (= type SharedMediaType.IMAGE)
+        (sharing-intent-images values scaffold-messenger)
+        :else (sharing-intent-other values  scaffold-messenger)))))
+
+(defn add-note-fab []
+  (f/widget
+   :watch [brightness (rd/subscribe [::model/get-brightness])
+           prefs (rd/subscribe [::model/prefs])]
+
+   :let [fab-color-light (dt/fab-color prefs "light")
+         fab-color-dark (dt/fab-color prefs "dark")]
+
+   :padding {:bottom 30}
+
+   (m/Column
+    .mainAxisAlignment m/MainAxisAlignment.end
+    .children
+    [(f/widget
+      :watch [saved-notes (rd/subscribe [::model/get-notes])]
+      :context ctx
+      :get [m/ScaffoldMessenger]
+
+      :bg-watcher ([shared (when (not kIsWeb) (sharing-intent/FlutterSharingIntent.instance.getInitialSharing))]
+                   (await (handle-shared shared scaffold-messenger)))
+
+      :bg-watcher ([values (when (not kIsWeb)
+                             (sharing-intent/FlutterSharingIntent.instance.getMediaStream))]
+
+                   (await (handle-shared values scaffold-messenger)))
+
+      (m/Tooltip
+       .message "Create note"
+       .child (read/add-note-fab-button prefs "main")))
+
+     (m/SizedBox .height 5)
+
+     (f/widget
+      :context ctx
+      :get [m/ScaffoldMessenger]
+      (f/widget
+       (m/Tooltip
+        .message "Quick voice capture")
+       (m/FloatingActionButton
+        .backgroundColor (if (= m/Brightness.dark brightness)
+                           fab-color-dark
+                           fab-color-light)
+        .shape (m/CircleBorder)
+        .child (m/Icon m/Icons.mic
+                       .color read/fab-icon-color)
+        .onPressed
+        (fn []
+          (let [note (utils/init-new-recording-note)]
+            (rd/dispatch [::model/upload-note  [note true]])
+            (utils/log-analytics "note_created")
+            (rd/dispatch [::model/set-new-plaintext ""])
+            (rd/dispatch [::model/set-key :override-title ""])
+            (rd/dispatch [::model/set-key :start-recording?
+                          ;;Start recording for section id
+                          (-> note :sections first first)])
+            (-> ctx go_router/GoRouterHelper
+                (.pushNamed "edit"
+                            .pathParameters {"id" (:id note)}
+                            .extra {:autofocus false}))
+            nil)))))])))
+
+(defn long-press-fab []
+  (f/widget
+   :context ctx
+   :padding {:horizontal 30
+             :left 70
+             :bottom 70}
+
+   :watch [prefs (rd/subscribe [::model/prefs])]
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+   :let [fab-color-light (dt/fab-color prefs "light")
+         fab-color-dark (dt/fab-color prefs "dark")]
+
+   (m/Row
+    .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+    .children
+    [(m/FloatingActionButton
+      .shape (m/CircleBorder)
+      .backgroundColor (if (= m/Brightness.dark brightness)
+                         fab-color-dark
+                         fab-color-light)
+      .child
+      (m/Icon m/Icons.cancel)
+      .onPressed (fn []
+                   (popup/confirm
+                    ctx "Cancel batch delete?"
+                    (fn []
+                      (rd/dispatch [::model/cancel-batch-delete])))
+
+                   nil))
+
+     (m/FloatingActionButton
+      .backgroundColor (if (= m/Brightness.dark brightness)
+                         fab-color-dark
+                         fab-color-light)
+
+      .shape (m/CircleBorder)
+      .child
+      (m/Icon m/Icons.delete)
+      .onPressed (fn []
+                   (popup/confirm
+                    ctx "Really delete these notes?"
+                    (fn []
+                      (rd/dispatch [::model/batch-delete!])))
+                   nil))])))
+
+(defn load-analytics [])
+
+;;client id's
+;; (if (and (not kIsWeb)
+;;      Platform.isIOS)
+;;                             "989769042149-46c4m1b144k01fdav1lf49h7redkc2gc.apps.googleusercontent.com"
+;;                             "989769042149-e3onm9bvou4g08c8b9s6lu8h7341ro8b.apps.googleusercontent.com")
+
+;; (defn load-deeplink [dl saved-notes]
+;;   (when-let [note (first (filter #(= dl (:id %)) saved-notes))]
+;;     (rd/dispatch
+;;      [::model/update-current-note
+;;       (fn [_]
+;;         (utils/map-deep-into note))])))
+
+(defn load-stored-notification-note? [ctx]
+  (let [prefs (await (sp/SharedPreferences.getInstance))
+        id? (.getString prefs "pending_notification_id")]
+    (.remove prefs "pending_notification_id")
+    (when id?
+      (-> ctx go_router/GoRouterHelper
+          (.pushNamed "edit"
+                      .pathParameters {"id" id?}
+                      .extra {:autofocus false})))
+    nil))
+
+(defn load-notification-message [ctx message ^m/ScaffoldMessengerState scaffold-messenger]
+
+  (let
+   [m (model/dart->clj-ds (.-data message))
+    desc (m "description")
+    id (m "note_id")]
+
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar
+                    .content (m/Text (if desc
+                                       (str "Reminder: " desc)
+                                       "Reminder"))
+                    .action (m/SnackBarAction
+                             .label "Open"
+                             .onPressed
+                             (fn []
+                               (dutils/popUntilRoot ctx)
+                               (-> ctx go_router/GoRouterHelper
+                                   (.pushNamed "edit"
+                                               .pathParameters {"id" id}
+                                               .extra {:autofocus false}))
+
+                               nil))))))
+
+(def ^m/Widget home-screen
+  (f/build [^GoRouterState router-state]
+           :watch [batch-delete-notes (rd/subscribe [::model/batch-delete-notes])]
+           :get [m/ScaffoldMessenger m/Theme]
+           :get {{cs .-colorScheme} m/Theme}
+
+           :context ctx
+           :bg-watcher ([{uid .-uid
+                          email .-email} (.authStateChanges FirebaseAuth.instance)]
+                        (println "SIGNUPDEBUGGING main " uid)
+                        (if uid
+                          (do
+                            (rd/dispatch [::model/refresh-notes])
+                            (rd/dispatch [::model/fetch-user-options])
+                            
+                            (model/log-analytics "login")
+                            (await (utils/init-revenuecat- uid))
+
+                            (when (not kIsWeb)
+                              (await (handle-initial-notification-click))
+                              (when Platform.isAndroid
+                                (HomeWidget.registerInteractivityCallback widget-callback))
+                              (await (messaging/initialize))
+                              (rd/dispatch [::model/load-home-screen-widget-data])
+                              (await (.init alarm/Alarm))))
+
+                          (if kIsWeb
+                              (-> ctx go_router/GoRouterHelper
+                                  (.go
+                                   "/login"))
+                            (do
+                             (utils/log-analytics "onboarding_starting")
+                             (-> ctx
+                                 go_router/GoRouterHelper
+                                 (.go
+                                  "/build-first-note")))))
+
+                        (when (and uid email)
+                          (let [db (fdb/FirestoreDB)]
+                            (await (.setEmail
+                                    db
+                                    email
+                                    uid)))))
+
+           :managed [_ (f_widgets/AppLifecycleListener
+
+                        .onHide (fn []
+                                  ;;This makes sure we run all save callbacks when the user hides the screen.
+                                  (rd/dispatch [::model/reset-restructure-mode])
+                                  (.unfocus (.-primaryFocus (.instance m/FocusManager)))
+                                  (rd/dispatch [::model/set-key :filter-by-section nil])
+                                  nil)
+
+                        .onResume (fn []
+                                    (when (not kIsWeb)
+                                      (.resetBadgeCountButKeepNotificationsInCenter Eraser))
+                                    (load-stored-notification-note? ctx)))]
+           (f/widget
+            (m/Scaffold
+             .floatingActionButtonLocation m/FloatingActionButtonLocation.endFloat
+             .floatingActionButton
+             (if
+              (seq batch-delete-notes)
+               (long-press-fab)
+               (add-note-fab)))
+            .body
+            (m/SafeArea
+             .child
+             (read/list-notes)))))
+
+(defonce router
+  (GoRouter
+   .initialLocation "/"
+   .routes [(GoRoute
+             .name "root"
+             .path "/"
+             .builder home-screen)
+
+            (GoRoute
+             .name "mindmap"
+             .path "/mindmap"
+             .builder mindmap)
+
+            (GoRoute
+             .name "build-first-note"
+             .path "/build-first-note"
+             .builder build-first-note)
+
+            (go_router/GoRoute
+             .name "edit"
+             .path "/edit/:id"
+             .pageBuilder (fn [ctx state]
+                            (if kIsWeb
+                              (go_router/NoTransitionPage
+                               .child (edit/edit (-> state .-pathParameters (get "id"))
+                                                 (.-extra state)))
+
+                              (go_router/CustomTransitionPage
+                               .key (.-pageKey state)
+                               .child (edit/edit (-> state .-pathParameters (get "id"))
+                                                 (.-extra state))
+                               .transitionsBuilder (fn [ctx animation sec-animation child]
+                                                     (m/FadeTransition
+                                                      .opacity animation
+                                                      .child child))))))
+
+            
+
+            (GoRoute
+             .name "reminders"
+             .path "/reminders"
+             .builder reminders/show)
+
+            (GoRoute
+             .name "settings"
+             .path "/settings"
+             .builder settings/show)
+
+            
+
+            (GoRoute
+             .name "manual"
+             .path "/manual"
+             .builder misc/manual)
+
+            (GoRoute
+             .name "image-painter"
+             .path "/image-painter"
+             .builder image-painter)
+
+            (GoRoute
+             .name "image-carousel"
+             .path "/image-carousel"
+             .pageBuilder (fn [ctx ^GoRouterState state]
+                            (when (not kIsWeb)
+                              (FirebaseCrashlytics.instance.setCustomKey
+                               "opening-page" "image-carousel"))
+                            (go_router/CustomTransitionPage
+                             .key (.-pageKey state)
+                             .child (carousel (-> state .-extra :images)
+                                              (-> state .-extra :note)
+                                              (-> state .-extra :folder-id)
+                                              (-> state .-extra :misc))
+                             .transitionDuration (Duration .milliseconds 200)
+                             .transitionsBuilder (fn [ctx
+                                                      ^m/Animation animation
+                                                      ^m/Animation sec-animation
+                                                      ^m/Widget child]
+                                                   (let [t (#/(m/Tween m/Offset)
+                                                            .begin (m/Offset 0.0 1.0)
+                                                            .end (m/Offset 0.0 0.0))
+                                                         tween (.chain t (m/CurveTween
+                                                                          .curve (m/Curves.ease)))]
+                                                     (m/SlideTransition
+                                                      .position (.drive animation tween)
+                                                      .child child))))))
+            (GoRoute
+             .name "image-carousel2"
+             .path "/image-carousel2"
+             .pageBuilder (fn [ctx ^GoRouterState state]
+                            (when (not kIsWeb)
+                              (FirebaseCrashlytics.instance.setCustomKey
+                               "opening-page" "image-carousel2"))
+                            (go_router/CustomTransitionPage
+                             .key (.-pageKey state)
+                             .child (carousel2 (-> state .-extra :image-urls)
+                                               (-> state .-extra :note)
+                                               (-> state .-extra :misc))
+                             .transitionDuration (Duration .milliseconds 200)
+                             .transitionsBuilder (fn [ctx
+                                                      ^m/Animation animation
+                                                      ^m/Animation sec-animation
+                                                      ^m/Widget child]
+                                                   (let [t (#/(m/Tween m/Offset)
+                                                            .begin (m/Offset 0.0 1.0)
+                                                            .end (m/Offset 0.0 0.0))
+                                                         tween (.chain t (m/CurveTween
+                                                                          .curve (m/Curves.ease)))]
+                                                     (m/SlideTransition
+                                                      .position (.drive animation tween)
+                                                      .child child))))))
+
+            (GoRoute
+             .name "verify-email"
+             .path "/verify-email"
+             .builder verify-email)
+
+            (GoRoute
+             .name "login"
+             .path "/login"
+             .builder login)]))
+
+       ;;https://api.flutter.dev/flutter/flutter_localizations/GlobalMaterialLocalizations-class.html
+(def locales
+  (mapv #(Locale %) ["en"] ;["en" "sv" "fr" "de" "es" "vi" "ro"]
+        ))
+
+(defn parse-disorganized-uri [uri]
+  (println "parsing uri " (str uri))
+  (let [uri (str uri)
+        [_ query] (clojure.string/split uri #"\?" 2)
+        _ (println "query " query)
+        pairs (clojure.string/split query #"&")
+        _ (println "pairs " pairs)
+        result (->> pairs
+                    (map #(clojure.string/split % #"=" 2))
+                    (into {})
+                    (select-keys ["noteId" "sectionId" "itemId"]))]
+    (println "result " result)
+    result))
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn widget-callback [uri]
+
+  (await (firebase/Firebase.initializeApp
+          .options (options/DefaultFirebaseOptions.currentPlatform)))
+  (println "hello " uri)
+  (rd/register-defaults!)
+  (model/register!)
+
+  (let [m (into {} (.splitQueryString Uri (str uri)))
+        fdb (fdb/FirestoreDB)
+        ;;m contains noteId, sectionId and itemId
+        m (assoc m ;;lmao
+                 "noteId"
+                 (m "disorganized://checkboxtoggled?noteId"))
+        note  (await (.getNoteById fdb (m "noteId")))
+        note (into {} (for [[k v] note]
+                        [(keyword k) (model/dart->clj-ds v)]))
+
+        updated-note (update note
+                             :sections
+                             (fn [sections]
+
+                               (into {}
+                                     (map (fn [[name section]]
+                                            (if (not= (section "id")
+                                                      (m "sectionId"))
+                                              [name section]
+                                              [name (-> section
+                                                        (update
+                                                         "checked-content"
+                                                         #(conj %
+                                                                (reduce
+                                                                 (fn [_ item]
+                                                                   (when (= (item "id")
+                                                                            (m "itemId"))
+                                                                     (reduced (assoc item "checkbox" true))))
+                                                                 nil
+                                                                 (section "content"))))
+
+                                                        (update "content"
+                                                                #(into
+                                                                  []
+                                                                  (keep
+                                                                   (fn [item]
+                                                                     (when (not= (item "id")
+                                                                                 (m "itemId"))
+                                                                       item))
+                                                                   %))))]))
+                                          sections))))
+        section (reduce (fn [_ [_ section]]
+                          (when (= (section "id") (m "sectionId"))
+                            (reduced section)))
+                        nil
+                        (updated-note :sections))]
+
+    (rd/dispatch [::model/upload-note [updated-note true]])
+
+    (await (HomeWidget.saveWidgetData "todo_list" (c/jsonEncode section)))
+    (await (HomeWidget.updateWidget
+            .androidName "NoteWidgetReceiver"))))
+
+(defn handle-initial-notification-click []
+  (when-let
+   [notification (await
+                  (.getInitialNotificationAction
+                   (notif/AwesomeNotifications)))]
+    (let [payload (model/dart->clj-ds (.-payload notification))
+          action (.-buttonKeyPressed notification)
+          id (payload "note_id")
+          m {"note-id" (payload "note_id")
+             "section-id" (payload "section_id")
+             "description" (payload "description")}]
+      (if (not (string/blank? action))
+        (await (messaging/exec-reminder-action action m))
+
+        (.pushNamed router "edit"
+                    .pathParameters {"id" id}
+                    .extra {:autofocus false})))))
+
+(defn refresh-remote-config []
+  (let [rc frc/FirebaseRemoteConfig.instance
+        activated? (try (await (.fetchAndActivate rc))
+                        (catch Exception e
+                          (println "Couldn't fetch and activate rc")
+                          nil))]))
+
+(defn main
+  []
+  (f_widgets/WidgetsFlutterBinding.ensureInitialized)
+  (await (firebase/Firebase.initializeApp
+          .options (options/DefaultFirebaseOptions.currentPlatform)))
+(when (not kDebugMode)
+   (init-analytics))
+  (init-remote-config)
+  ;(init-appcheck)
+
+  (add-brightness-observer)
+  (rd/register-defaults!)
+  (model/register!)
+  (.enable FlutterCryptography)
+  (when (and (not kDebugMode) (not kIsWeb))
+    (set! (.-onError FlutterError)
+          (.-recordFlutterFatalError FirebaseCrashlytics.instance)))
+
+  (f/run
+   :get [m/MediaQuery m/Theme]
+   :context ctx
+   :watch [{uid .-uid} (.authStateChanges FirebaseAuth.instance)]
+
+   :bg-watcher ([alarm-set (alarm/Alarm.ringing)]
+                (let [alarms (.-alarms alarm-set)]
+
+                  (when (> (.-length alarms) 0)
+                    (let [{note-id :note-id
+                           section-id :section-id
+                           section-position :section-position
+                           section-name :section-name}
+                          (reader/read-string (.-payload (.-first alarms)))]
+
+                      (.pushNamed router "edit"
+                                  .pathParameters {"id" note-id}
+                                  .extra {:jumpto section-position
+                                          :autofocus false})))))
+
+   :bg-watcher ([cid (rd/subscribe [::model/current-note-id])]
+                (when cid
+                  (.pushNamed router "edit"
+                              .pathParameters {"id" cid}
+                              .extra {:autofocus false})))
+
+   :bg-watcher ([prefs (rd/subscribe [::model/get-user-options])]
+                (let [brightness
+                      (cond
+                        (= "dark" (prefs "color-scheme")) m/Brightness.dark
+                        (= "light" (prefs "color-scheme")) m/Brightness.light
+                        :else (m/WidgetsBinding.instance.platformDispatcher.-platformBrightness))]
+                  (rd/dispatch [::model/set-brightness brightness])))
+
+   :bg-watcher ([user-stream (when uid (.snapshots
+                                        (.doc
+                                         (.collection FirebaseFirestore.instance "users")
+                                         uid))) :refresh-on uid]
+
+                (when uid
+                  (when-let [parsed (model/firestore-stream->map user-stream)]
+                    (rd/dispatch [::model/set-key :prefs
+                                  (or (parsed "preferences") {})]))))
+
+   :get {{hours? .-alwaysUse24HourFormat} m/MediaQuery}
+   :get {{tthm .-textTheme} m/Theme}
+
+   :watch [prefs (rd/subscribe [::model/prefs])]
+
+   :context ctx
+   :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                (fn [_]
+                  (load-stored-notification-note? ctx)
+
+                  nil)) :dispose nil]
+
+   :bind {:timeformat-24-hours? (if (some? hours?) hours? true)}
+   (m/MediaQuery
+    .data (.copyWith
+           media-query
+           .textScaler
+           (p/TextScaler.linear
+            (if prefs
+              (or (prefs "font-scaling") 1.0)
+              1.0))))
+
+   (m/MaterialApp.router
+    .routerConfig router
+    .supportedLocales locales
+    .themeMode (case (when prefs (prefs "color-scheme"))
+                 "dark" m/ThemeMode.dark
+                 "light" m/ThemeMode.light
+                 m/ThemeMode.system)
+    .title (str "Disorganized")
+    .debugShowCheckedModeBanner false
+    .theme (dt/customized-theme "light" prefs)
+
+    .darkTheme (dt/customized-theme "dark" prefs))))

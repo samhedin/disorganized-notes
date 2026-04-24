@@ -1,0 +1,325 @@
+(ns disorganized.ui.tutorial
+  (:require [disorganized.messaging :as messaging]
+            [disorganized.import.import :as import]
+            ["package:go_router/go_router.dart" :as go_router :refer [GoRouter GoRoute GoRouterState GoRouterHelper]]
+            [disorganized.examples :as ex]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            ["package:flutter/foundation.dart" :refer [kIsWeb]]
+            ["dart:io" :refer [Platform]]
+            ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
+            ["package:cloud_functions/cloud_functions.dart" :refer [FirebaseFunctions]]
+            ["package:disorganized_notes/utils.dart" :as dutils]
+            ["package:firebase_auth/firebase_auth.dart" :as firebase-auth :refer [FirebaseAuth]]
+            [cljd.flutter :as f]
+            [hti.re-dash.alpha :as rd]
+            ["package:flutter/material.dart" :as m]
+            [disorganized.model :as model]))
+
+(defn dropdown-widget [text]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :padding {:horizontal 24
+             :vertical 12}
+   (m/Align .alignment m/Alignment.bottomLeft)
+   (m/Text text
+           .style (.-bodyLarge tthm))))
+
+(defn zen-of-disorganized-child [icon title-text description tthm]
+  (f/widget
+   :let [size (.-titleMedium tthm)]
+
+   (m/Card
+    .elevation 0.0
+    .child
+    (m/ExpansionTile
+     .title
+     (m/ListTile
+      .title (m/Text title-text
+                     .style size)
+      .leading (m/Icon icon))
+     .children [(dropdown-widget description)]))))
+
+(defn tutorial-chapter [title icon text tthm]
+  [(m/ListTile
+    .title (m/Text title
+                   .style (.-titleLarge tthm))
+    .leading (m/Icon icon))
+
+   (f/widget
+    :padding {:horizontal 12}
+    (m/Align
+     .alignment m/Alignment.bottomLeft)
+    (m/Text text
+            .style (.-bodyLarge tthm)))
+   (m/SizedBox .height 12)])
+
+(defn tutorial-dropdown []
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :padding {:horizontal 4}
+   (m/Card
+    .elevation 4
+    .child
+    (m/ExpansionTile
+     .title
+     (m/ListTile
+      .title
+      (m/Text "Every note is a template"
+              .style (.-titleLarge tthm)))
+     .children
+     [(f/widget
+       :padding {:horizontal 12}
+       (m/Align
+        .alignment m/Alignment.bottomLeft)
+       (m/Text "Many notes are similar to each other and that's where cloning can save you time.
+
+If you have a recipe note with a table of ingredients, you can clone it to quickly create a new note with the same table."
+               .style (.-bodyLarge tthm)))
+      (m/SizedBox .height 12)
+      (f/widget
+       :padding {:horizontal 12
+                 :bottom 12}
+       (m/Row
+        .children [(m/Text "Clone icon: ")
+                   (m/Icon m/Icons.copy_all)]))]))))
+
+(defn zen-of-disorganized [tthm]
+
+  [(zen-of-disorganized-child
+    m/Icons.post_add
+    "Build with sections"
+    "Build your note using sections. For example, to make a recipe you could add a table of ingredients and a cooking timer."
+
+    tthm)
+
+   (m/SizedBox .height 4)
+   (zen-of-disorganized-child
+    m/Icons.tag
+    "Organize with tags"
+    "Tags help you find your note later.
+If you're writing a recipe, add a recipe tag!"
+    tthm)
+
+   (m/SizedBox .height 4)
+   (zen-of-disorganized-child
+    m/Icons.copy_all
+    "Reuse with cloning"
+    "Many notes are similar to each other. 
+For example, most recipes have a table of ingredients. 
+
+Instead of recreating the table for each recipe, just clone an old recipe and its sections and tags will be copied to a new note."
+    tthm)])
+
+(defn example-notes-popup [large?]
+  (f/widget
+   :managed [gk (m/GlobalKey) :dispose nil]
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+
+   (m/PopupMenuButton
+    .key gk
+    .child (m/ElevatedButton.icon
+            .label (f/widget
+                    :padding {:horizontal (if large? 4 0)
+                              :vertical (if large? 4 0)}
+                    (if large?
+                      (m/Text "Starting notes"
+                              .style (.-titleLarge tthm))
+                      (m/Text "Starting notes")))
+
+            .icon (m/Icon m/Icons.auto_stories)
+            .onPressed (fn []
+                         (.showButtonMenu (.-currentState gk))))
+    .itemBuilder
+    (fn [_]
+      #dart ^m/PopupMenuEntry
+       [(m/PopupMenuItem
+         .value "recipe"
+         .child (m/ListTile
+                 .title (m/Text "Recipe (cloning explained)")
+                 .trailing (m/Icon m/Icons.copy_all)))
+
+        (m/PopupMenuItem
+         .value "groceries"
+         .child (m/ListTile
+                 .title (m/Text "Shopping list")))
+
+        (m/PopupMenuItem
+         .value "workout"
+         .child (m/ListTile
+                 .title (m/Text "Gym workout")))
+
+        (m/PopupMenuItem
+         .value "todo"
+         .child (m/ListTile
+                 .title (m/Text "A few things to try!")))
+
+;; (m/PopupMenuItem
+       ;;  .value "love-letter"
+       ;;  .child (m/ListTile
+       ;;          .title (m/Text "Love letter")))
+        ])
+
+    .onSelected (fn [selection]
+                  (if (= "import" selection)
+                    (import/import-note-popup ctx)
+                    (let [note (case selection
+                                 "groceries" (ex/groceries)
+                                 "todo" (ex/todo)
+                                 "workout" (ex/workout)
+                                        ;                                 "love-letter" (ex/love-letter)
+                                 "recipe" (ex/recipe))]
+                      (rd/dispatch [::model/upload-note [note true]])
+                      (rd/dispatch [::model/refresh-notes])
+                      (rd/dispatch [::model/set-new-plaintext (:plaintext note)])
+                      (rd/dispatch [::model/set-key :override-title (str (:title note))])
+                      (rd/dispatch [::model/set-current-note-id (:id note)])))))))
+
+(defn longest-consecutive [bools]
+  (reduce (fn [count v]
+            (if v
+              (inc count)
+              count))
+          0
+          bools))
+
+(defn user-younger-than?
+  [days]
+  (boolean
+   (when-let [user? (-> FirebaseAuth .-instance .-currentUser)]
+     (.isAfter
+      (-> user? .-metadata .-creationTime)
+      (.subtract (DateTime.now) (Duration .days days))))))
+
+(defn recent-user?
+  []
+  (when-let [user? (-> FirebaseAuth .-instance .-currentUser)]
+    (.isAfter
+     (-> user? .-metadata .-creationTime)
+     (.subtract (DateTime.now) (Duration .days 12)))))
+
+(defn days-since-registration []
+  (when-let [user? (-> FirebaseAuth .-instance .-currentUser)]
+    (.inDays (.difference  (DateTime.now) (-> user? .-metadata .-creationTime)))))
+
+(defn consecutive-notes [saved-notes]
+  (let [dates (sort (mapv :created_at (filter #(nil? (:default %))
+                                              saved-notes)))
+        ;;The user shouldn't be able to just spam 5 notes straight away.
+        ;;There needs to be some habit to it.
+        good-distance-to-last-note
+        (map-indexed
+         (fn [i date]
+           (if (= 0 i)
+             true
+             (let [last-date (nth dates (dec i))]
+               (and (.isBefore date (.add last-date (Duration .hours 48)))
+                    (.isAfter date (.add last-date (Duration .hours 7)))))))
+         dates)]
+    (longest-consecutive good-distance-to-last-note)))
+
+(defn user-can-claim-premium? [saved-notes]
+  (when (recent-user?)
+    (or (>= (consecutive-notes saved-notes) 4)
+        (some :imported saved-notes))))
+
+(defn premium-offer [scaffold-messenger ctx]
+  (m/ElevatedButton.icon
+   .onPressed (fn []
+                (model/snackbar scaffold-messenger "Setting premium...")
+                (await
+                 (if (or kIsWeb Platform.isAndroid)
+                   (let [output (await
+                                 (.call
+                                  (FirebaseFunctions.instance.httpsCallable "grant_n_months")
+                                  (dutils/stringKeys {"uid" (model/uid)
+                                                      "duration" 3})))
+                         status (get (.-data output) "status")]
+
+                     (if (= "success" status)
+                       (do
+                         (await (model/restore-purchase))
+                         (model/snackbar scaffold-messenger "You have premium!"))
+
+                       (model/snackbar
+                        scaffold-messenger
+                        (case status
+                          "too-old" "Account older than 12 days, please contact support."
+                          "Something went wrong, please contact support and include your user id (found in settings)."))))
+
+                   ;;Apple toc forbids us from adding premium in any other way than this.
+                   (do
+                     (url/launch (str "https://apps.apple.com/redeem?ctx=offercodes&id=6738280174&code=THREEMONTHS"))
+                     (await (model/restore-purchase))
+                     (model/snackbar scaffold-messenger "Open settings and click Sync premium access after signing up"))))
+
+                nil)
+   .icon (m/Icon m/Icons.workspace_premium)
+   .label (m/Text "Click here for 3 months premium!")))
+
+(defn schedule-habit-reminders []
+  (await (model/request-notification-permission))
+  (let [tz (await (.getLocalTimeZoneIdentifier
+                   (notif/AwesomeNotifications)))]
+
+     ;;These have to have different ids, otherwise the last one rewrites the others.
+    (await
+     (.createNotification
+      (notif/AwesomeNotifications)
+
+      .content
+      (notif/NotificationContent
+       .id 0
+       .channelKey "habit_channel"
+       .title "Make a shopping list!"
+       .body "Try the list section!"
+       .wakeUpScreen false
+       .category notif/NotificationCategory.Recommendation)
+
+      .schedule
+      (notif/NotificationCalendar.fromDate
+       .date (.add (DateTime.now) (Duration .hours 24))
+       .allowWhileIdle false
+       .preciseAlarm false)))
+
+    (await
+     (.createNotification
+      (notif/AwesomeNotifications)
+
+      .content
+      (notif/NotificationContent
+       .id 2
+       .channelKey "habit_channel"
+       .title "Try a new section!"
+       .body "Many sections to check out, try a new one!"
+       .category notif/NotificationCategory.Recommendation)
+
+      .schedule
+      (notif/NotificationCalendar.fromDate
+       .date (.add (DateTime.now) (Duration .hours 96))
+       .allowWhileIdle false
+       .preciseAlarm false)))
+
+    (await
+     (.createNotification
+      (notif/AwesomeNotifications)
+
+      .content
+      (notif/NotificationContent
+       .id 3
+       .channelKey "habit_channel"
+       .title "Try the tables"
+       .body "Tables are great! Check them out."
+       .category notif/NotificationCategory.Recommendation)
+
+      .schedule
+      (notif/NotificationCalendar.fromDate
+       .date (.add (DateTime.now)
+                   (Duration .hours 168))
+       
+       .allowWhileIdle false
+       .preciseAlarm false)))))
+
+
+
+

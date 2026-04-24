@@ -1,0 +1,353 @@
+(ns disorganized.ui.draw
+  (:require
+   ["dart:ui" :refer [PointerDeviceKind]]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share]]
+   ["package:flutter/material.dart" :as m]
+   ["dart:convert" :as c]
+   ["package:disorganized_notes/stopicon.dart" :refer [StopIcon]]
+   ["package:scribble/scribble.dart" :as scribble]
+   [disorganized.ui.theme :as theme]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   [cljd.flutter :as f]
+   [clojure.set :refer [rename-keys]]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   ["package:flutter_colorpicker/flutter_colorpicker.dart" :as cp]
+   [hti.re-dash.alpha :as rd]))
+
+(defn color-button [color notifier]
+  (f/widget
+   :padding {:right 10}
+   (m/InkWell
+    .onTap
+    (fn []
+      
+      (.setColor notifier color))
+
+    .child (m/Material
+            .shape (m/CircleBorder)
+            .elevation 2
+            .child (m/Container
+                    .width 40
+                    .height 40
+                    .decoration
+                    (m/BoxDecoration
+                     .color color
+                     .shape m/BoxShape.circle
+                     .border (m/Border.all
+                              .color (if (= m/Colors.black color)
+                                       m/Colors.white
+                                       m/Colors.black)
+                              .width 2))
+                    .child (m/Text ""))))))
+
+(defn show-colorpicker [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :managed [*color (atom nil) :dispose nil]
+    (m/AlertDialog
+     .title
+     (m/Text "Select color")
+     .content
+     (cp/HueRingPicker
+      .pickerColor (m/Color 0xff443a49)
+      .onColorChanged (fn [c]
+                        (reset! *color c)))
+     .actions
+     (concat
+      [(m/TextButton
+        .onPressed #(.pop navigator)
+        .child (m/Text "Cancel"))]
+
+      [(f/widget
+        (m/TextButton
+         .onPressed
+         (fn []
+           (if-let [^m/Color c @*color]
+             (.pop navigator c)
+             (.pop navigator)))
+         .child (m/Text "Apply")))])))))
+
+(defn toolbar [notifier section-id]
+  (f/widget
+   :watch [{{:strs [colors]} section-id}
+           (rd/subscribe [::model/current-sections])]
+   :get [m/ScaffoldMessenger]
+   :let [colors (mapv #(m/Color %) colors)]
+   :padding {:bottom 5}
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.start
+    .children
+
+    (concat
+     [(m/SingleChildScrollView
+       .scrollDirection m/Axis.horizontal
+       .child
+       (m/Row
+        .children
+        (concat
+         (mapv
+          (fn [color]
+            (color-button color notifier))
+          [m/Colors.white m/Colors.black])
+
+         [(f/widget
+           :get {{cs .-colorScheme} m/Theme}
+
+           (m/TextButton
+            .onPressed (fn []
+                         (.setEraser notifier))
+            .child (m/Material
+                    .shape (m/CircleBorder)
+
+                    .elevation 2
+                    .child (StopIcon .backgroundColor (.-surfaceVariant cs)
+                              .crossColor m/Colors.red))))
+
+          (m/ValueListenableBuilder
+           .valueListenable ^scribble/ScribbleNotifier notifier
+           .builder (fn [ctx value child]
+
+                      (m/IconButton
+                       .onPressed (fn []
+                                    (if (.-canUndo notifier)
+                                      (.undo notifier)
+                                      (.showSnackBar scaffold-messenger
+                                                     (m/SnackBar .content
+                                                                 (m/Text "Nothing to undo"))))
+                                    nil)
+                       .icon (m/Icon m/Icons.undo))))
+
+          (m/ValueListenableBuilder
+           .valueListenable ^scribble/ScribbleNotifier notifier
+           .builder (fn [ctx value child]
+                      (m/IconButton
+                       .onPressed (fn []
+                                    (if (.-canRedo notifier)
+                                      (.redo notifier)
+                                      (.showSnackBar scaffold-messenger
+                                                     (m/SnackBar .content
+                                                                 (m/Text "Nothing to redo"))))
+                                    nil)
+                       .icon (m/Icon m/Icons.redo))))])))
+      (m/SizedBox .height 10)]
+
+     [(m/Row
+       .children
+       (concat
+        [(f/widget
+          :get {{cs .-colorScheme} m/Theme}
+          :context ctx
+          :padding {:right 10}
+          (m/InkWell
+           .onTap (fn []
+                    (let [color (await (show-colorpicker ctx))]
+                      (.setColor notifier color)
+                      (rd/dispatch
+                       [::model/update-current-note
+                        (fn [m]
+                          (update-in m
+                                     [:sections section-id "colors"]
+                                     #(concat [(.toARGB32 color)]
+                                              (into [] %))))])))
+
+           .child (m/Material
+                   .elevation 2
+                   .shape (m/CircleBorder)
+                   .child
+                   (m/Container
+                    .width 40
+                    .height 40
+                    .decoration
+                    (m/BoxDecoration
+                     .gradient (m/LinearGradient
+                                .colors [m/Colors.red m/Colors.blue]
+                                .begin m/Alignment.topLeft
+                                .end m/Alignment.bottomRight)
+                     .shape m/BoxShape.circle
+                     .border (m/Border.all
+                              .color m/Colors.black
+                              .width 2))
+                    .child (m/Text "")))))]
+        (mapv
+         (fn [color]
+           (color-button color notifier))
+         colors)))]))))
+
+(defn save-drawing [notifier section-name scaffold-messenger]
+  (when (< 50 (count (.-lines (.-currentSketch  notifier))))
+    (.showSnackBar
+     scaffold-messenger
+     (m/SnackBar
+      .content
+      (m/Text "Warning: You have drawn 80 lines. 100 is the max possible."))))
+  
+  (if (< 100 (count (.-lines (.-currentSketch  notifier))))
+    (.showSnackBar
+     scaffold-messenger
+     (m/SnackBar
+      .content
+      (m/Text "Drawing too large to save, please create a new document. Larger drawings will be supported in a future update.")))
+    (let [json (.toJson (.-currentSketch  notifier))]
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      (assoc-in m
+                                [:sections section-name "content" "json"]
+                                json))]))))
+
+(defn scribble [notifier section-name *input-method]
+  (f/widget
+   :get {{cs .-colorScheme} m/Theme}
+   :watch [{{:strs [grid-interval view-height]} section-name}
+           (rd/subscribe [::model/current-sections])]
+
+ 
+   
+   :bg-watcher ([input-method *input-method]
+                (if (= "all" input-method)
+                  (.setAllowedPointersMode
+                   notifier
+                   scribble/ScribblePointerMode.all)
+                  (.setAllowedPointersMode
+                   notifier
+                   scribble/ScribblePointerMode.mouseAndPen)))
+
+   :bg-watcher ([{{:strs [stroke-width ]} section-name}
+                 (rd/subscribe [::model/current-sections])]
+                (.setStrokeWidth notifier (or stroke-width 3.0)))
+
+   :get [m/ScaffoldMessenger m/MediaQuery]
+   :let [height 500
+         scribbler (m/Listener
+                    .onPointerDown (fn [event]
+                                     (let [stylus? (= (.-kind event)
+                                                      PointerDeviceKind.stylus)]
+                                       (when stylus?
+                                         (reset! *input-method "stylus")
+                                         (.setAllowedPointersMode
+                                          notifier
+                                          scribble/ScribblePointerMode.mouseAndPen))))
+                    .child
+                    (scribble/Scribble
+                     .notifier notifier
+                     .drawPen true))]
+
+   (m/Listener
+    .onPointerUp (fn [_]
+                   (save-drawing notifier section-name scaffold-messenger)))
+   m/Column
+   .children
+   [(m/Row
+     .children
+     [(m/Expanded
+       .child
+       (m/ConstrainedBox
+        .constraints
+        (m/BoxConstraints
+         .minWidth 100
+         .minHeight height
+         .maxHeight height)
+        .child
+        (m/Card
+         .elevation 3
+         .child
+         (if (and grid-interval (> grid-interval 1))
+           (m/GridPaper
+            .interval grid-interval
+            .subdivisions 1
+            .color (.-tertiary cs)
+            .child scribbler)
+
+           scribbler))))
+      (m/Icon m/Icons.drag_handle
+              .size 35)])
+
+    (m/SizedBox .height 5)]))
+
+(defn show [section-name section]
+  (f/widget
+   :watch [{{:strs [content]} section-name}
+           (rd/subscribe [::model/current-sections])
+           restructure? (rd/subscribe [::model/get-restructure-mode section-name])]
+   :watch [{{:strs [grid-interval  stroke-width]} section-name}
+           (rd/subscribe [::model/current-sections])
+           premium? (rd/subscribe [::model/premium?])
+           input-method (atom "all") :as *input-method]
+   
+   :watch [grid-interval
+           (atom grid-interval)
+           :as *grid-interval
+           :refresh-on grid-interval]
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/ScaffoldMessenger]
+   :key (str section-name (section "id"))
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+   :managed [notifier
+             (doto (scribble/ScribbleNotifier
+                    .sketch (if-let [j (content "json")]
+                              (scribble/Sketch.fromJson
+                               (dutils/recursivelyStringifyKeys j))
+                              (scribble/Sketch.new .lines [])))
+               (as-> notifier
+                   ;;this default color works on both dark and white background.
+                   (.setColor notifier (theme/hsl 0 0 0.5)))) :refresh-on nil]
+
+   (m/Column
+    .key (m/ValueKey (str section-name restructure? "draw"))
+    .mainAxisSize m/MainAxisSize.min
+    .children
+    (concat
+     [(scribble notifier section-name *input-method)
+      (m/SizedBox .height 10)]
+     (if restructure?
+       [(m/Text "Allowed input"
+                .style (.-titleMedium tthm))
+        (m/SegmentedButton
+         .selected #{input-method}
+         .onSelectionChanged (fn [methods]
+                               (reset! *input-method (first methods)))
+         .segments [(m/ButtonSegment
+                     .label (m/Text "All")
+                     .value "all")
+
+                    (m/ButtonSegment
+                     .label (m/Text "Stylus")
+                     .value "stylus")])
+        (m/Text (if premium? "Grid size" "Grid size (premium only)")
+                .style (.-titleMedium tthm))
+        (m/Slider
+         .value (or grid-interval 0)
+         .onChanged (fn [v]
+                      (if premium? 
+                        (do (reset! *grid-interval v)
+                            (rd/dispatch
+                             [::model/update-current-note
+                              (fn [m]
+                                (assoc-in m [:sections section-name "grid-interval"] v))]))
+                        (await (model/paywall scaffold-messenger))))
+         .label (string/join (take 4 (str grid-interval)))
+         .divisions 10
+         .min 0
+         .max 200)
+
+        (m/Text "Stroke width"
+                .style (.-titleMedium tthm))
+        (m/Slider
+         .value (or stroke-width 3.0)
+         .onChanged (fn [v]
+                      (.setStrokeWidth notifier (or stroke-width 3.0))
+                      (rd/dispatch
+                       [::model/update-current-note
+                        (fn [m]
+                          (assoc-in m [:sections section-name "stroke-width"] v))]))
+         .label (string/join (take 4 (str stroke-width)))
+         .divisions 10
+         .min 1.0
+         .max 5.0)]
+       [(toolbar notifier section-name)])))))

@@ -1,0 +1,1601 @@
+(ns disorganized.ui.read
+  (:require
+   [disorganized.schema :as schema]
+   ["package:intl/intl.dart" :as intl]
+   ["package:permission_handler/permission_handler.dart" :refer [Permission]]
+   ["package:awesome_notifications_fcm/awesome_notifications_fcm.dart" :refer [AwesomeNotificationsFcm FcmSilentData]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["package:alarm/alarm.dart" :as alarm]
+   [disorganized.ui.list :as l]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter_slidable/flutter_slidable.dart" :refer [Slidable ActionPane] :as fs]
+   ["dart:convert" :as c]
+   ["package:cryptography_flutter_plus/cryptography_flutter_plus.dart" :as crf :refer [FlutterAesGcm FlutterCryptography FlutterPbkdf2]]
+   ["package:cryptography_plus/cryptography_plus.dart" :as cr]
+   ["package:cryptography_plus/helpers.dart" :refer [randomBytes]]
+   ["package:flutter/rendering.dart" :refer [debugPaintSizeEnabled]]
+   [disorganized.ui.media2 :as media2]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.tutorial :as tutorial]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions Settings FieldPath]]
+   ["package:firebase_auth/firebase_auth.dart" :as firebase-auth :refer [FirebaseAuth]]
+   ["package:awesome_notifications/awesome_notifications.dart" :as notif]
+   [disorganized.ui.edit :as edit]
+   ["package:in_app_review/in_app_review.dart" :as review]
+   [cljd.reader :as reader]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   ["package:circular_countdown_timer/circular_countdown_timer.dart" :as ct]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kProfileMode kDebugMode]]
+   [disorganized.ui.show-grid-note :as grid]
+   ["package:flutter/material.dart" :as m]
+   ["package:go_router/go_router.dart" :as go_router]
+   [cljd.flutter :as f]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [disorganized.model :as utils]
+   [hti.re-dash.alpha :as rd]))
+
+(defn searchable-notes [notes]
+  (mapv
+   (fn [{:keys [plaintext title sections] :as note}]
+     (let [t (string/lower-case (str title))
+           p (string/lower-case (str plaintext))]
+       [(:id note) (str  t p (string/lower-case (str sections)))]))
+   notes))
+
+(defn make-chapter [title description tthm]
+  [(m/Text title .style (.-titleSmall tthm))
+   (m/Text description)])
+
+(defn show-news [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .spacing 8
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (concat
+       [(m/Text "Recent news"
+                .style (.-titleLarge tthm))]
+
+       (make-chapter "Improved voice recording" "Voice recordings are now more responsive, faster to process and less buggy. 
+Silence is automatically cut out, and transcription quality and list creation is improved.
+
+Try it out!" tthm)
+       
+
+       (make-chapter "Mindmap added" "A mindmap section has been added - scroll down to the bottom of the section selector to try it out." tthm)
+
+       (make-chapter "Encryption" "Premium users can now encrypt their notes. 
+See note settings for more information - read carefully." tthm)
+
+       [(m/SizedBox .height 24)
+        (m/Text "If you have feature requests, bug reports or feedback I'm always available via Discord
+-- Sam")]))
+     .actions
+     [(m/TextButton
+       .onPressed (fn []
+                    (url/launch "https://discord.gg/UEeughB9Qn")
+                    (.pop navigator))
+       .child (m/Text "Visit Discord"))
+      (m/TextButton
+       .onPressed (fn []
+                    (.pop navigator))
+       .child (m/Text "Ok!"))]))))
+
+(defn web-premium-popup [ctx]
+  (m/showDialog
+   .barrierDismissible false
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .children
+      [(m/Text "Premium required!" .style (.-titleLarge tthm))
+       (m/SizedBox .height 4)
+       (m/Text "The web app requires premium.
+
+Please purchase premium through the iOS or Android app, then re-open this app and sign in with the same account you used on mobile!")])
+     .actions
+     [(m/TextButton
+       .child (m/Text "Sign out")
+       .onPressed (fn []
+                    (rd/dispatch [::model/empty-notes])
+                    (rd/dispatch [::model/set-user-options {}])
+                    (await (.signOut (.-instance FirebaseAuth)))
+
+                    (println "signed out!")))
+
+      (m/TextButton
+       .child (m/Text "iOS")
+       .onPressed (fn []
+                    (url/launch "https://apps.apple.com/us/app/disorganized-notes-todo/id6738280174")
+                    nil))
+
+      (m/TextButton
+       .child (m/Text "Android")
+       .onPressed (fn []
+                    (url/launch "https://play.google.com/store/apps/details?id=com.disorganized.disorganized&pli=1&gl=cn")
+                    nil))]))))
+
+(defn scheduled-alarms []
+  (f/widget
+   :watch [{:flds [alarms]} (.scheduled alarm/Alarm)
+           prefs (rd/subscribe [::model/prefs])
+           brightness (rd/subscribe [::model/get-brightness])]
+
+   :let [color (if (= m/Brightness.dark brightness)
+                 (theme/fab-color prefs "dark")
+                 (theme/fab-color prefs "light"))]
+   :managed [alarm (first
+                    (sort-by
+                     (fn [alarm]
+                       (.-dateTime alarm))
+                     alarms))
+             :dispose nil :refresh-on alarms]
+
+   :get [m/MediaQuery]
+   :get {{cs .-colorScheme} m/Theme}
+
+   (m/SliverVisibility
+    .visible (boolean (and alarm (:seconds alarm))))
+   .sliver
+   (m/SliverToBoxAdapter
+    .child (f/widget
+            :watch [refresh? (atom nil) :as *refresh?]
+            :padding {:bottom 12}
+            :context ctx
+            :let [{note-id :note-id
+                   section-name :section-name
+                   minutes :minutes
+                   section-position :section-position
+                   seconds :seconds
+                   hours :hours} (reader/read-string (.-payload alarm))
+                  duration (when seconds
+                             (Duration .seconds seconds .minutes minutes .hours hours))
+                  duration-until-alarm
+                  (.difference
+                   (.-dateTime alarm)
+                   (DateTime.now))
+
+                  progress (. duration "-" duration-until-alarm)]
+
+            :key (str refresh?)
+            ;;When the app goes to sleep it stops animating
+            ;;And without the refresh, it continues to animate
+            ;;from the point when it was put to sleep.
+            ;;In other words the timer goes out of sync
+            ;;Simply refreshing the widget onResume fixes it.
+            :managed [_ (f_widgets/AppLifecycleListener
+                         .onResume (fn []
+                                     (reset! *refresh? (random-uuid))))]
+
+            (m/Material
+             .color m/Colors.transparent
+             .shape (m/CircleBorder)
+             .clipBehavior m/Clip.antiAlias)
+            (m/InkWell
+             .customBorder (m/RoundedRectangleBorder
+                            .borderRadius theme/border-radius)
+
+             .onTap (fn []
+                      (-> ctx go_router/GoRouterHelper
+                          (.pushNamed "edit"
+                                      .pathParameters {"id" note-id}
+                                      .extra {:jumpto section-position
+                                              :autofocus false}))
+                      nil))
+
+            (ct/CircularCountDownTimer
+             .key (m/ValueKey (str progress "countdown"))
+             .duration (.-inSeconds duration)
+             .strokeWidth 7
+             .initialDuration (.-inSeconds progress)
+             .width (/ (-> media-query .-size .-width) 10)
+             .height (/ (->  media-query .-size .-height) 10)
+             .textFormat "HH:mm:ss"
+             .fillColor (.-surface cs)
+
+             .textStyle (m/TextStyle
+                         .color (if (= m/Brightness.dark brightness)
+                                  m/Colors.white
+                                  m/Colors.black))
+             .ringColor color
+             .isReverse true
+             .autoStart true)))))
+
+(defn card-theme [lightness]
+  (m/RoundedRectangleBorder
+   .side (m/BorderSide .color (theme/hsl 0 0 lightness))
+   .borderRadius (m/BorderRadius.circular 15)))
+
+(def fab-icon-color m/Colors.white)
+
+(defn add-note-fab-button [prefs tag]
+  (f/widget
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :let [fab-color-light (theme/fab-color prefs "light")
+         fab-color-dark (theme/fab-color prefs "dark")]
+
+   :context ctx
+   (m/FloatingActionButton
+    .heroTag tag
+    .backgroundColor (if (= m/Brightness.dark brightness)
+                       fab-color-dark
+                       fab-color-light)
+    .child (m/Icon m/Icons.add
+                   .color fab-icon-color)
+    .shape (m/CircleBorder)
+    .onPressed (fn []
+                 (let [note (utils/init-new-note)]
+                   (rd/dispatch [::model/upload-note  [note true]])
+                   (utils/log-analytics "note_created")
+                   (rd/dispatch [::model/set-new-plaintext ""])
+                   (rd/dispatch [::model/set-key :override-title ""])
+                   (rd/dispatch [::model/set-key :focus-plaintext? true])
+                   (-> ctx go_router/GoRouterHelper
+                       (.pushNamed "edit"
+                                   .pathParameters {"id" (:id note)}
+                                   .extra {:autofocus true})))
+                 nil))))
+
+(defn get-started [saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm]
+  (cond
+    (nil? saved-notes)
+    (m/SliverToBoxAdapter
+     .child (f/widget
+             :padding {:bottom 12
+                       :top 24}
+             :get {{tthm .-textTheme} m/Theme}
+             m/Center
+             (m/SizedBox
+              .height 50
+              .width 50
+              .child (m/Center
+                      .child (m/CircularProgressIndicator)))))
+
+    (and  (tutorial/user-younger-than? 3)
+          (<= (count saved-notes) 4)
+          (not hide-vid-tutorial?))
+
+    (m/SliverFillRemaining
+     .hasScrollBody false
+     .child
+     (f/widget
+      :let [button-size 180]
+      :watch [brightness (rd/subscribe [::model/get-brightness])]
+      :get {{tthm .-textTheme} m/Theme}
+      :padding {:horizontal 8
+                :vertical 4}
+      :managed [overlaycontroller (m/OverlayPortalController) :dispose nil]
+      :let [button (m/SizedBox
+                    .width button-size
+                    .child (m/ElevatedButton.icon
+                            .iconAlignment m/IconAlignment.end
+                            .onPressed (fn []
+                                         (.toggle overlaycontroller))
+
+                            .icon (m/Icon m/Icons.copy_all)
+                            .label (m/OverlayPortal
+                                    .controller overlaycontroller
+                                    .overlayChildBuilder
+                                    (fn [_]
+
+                                      (m/Positioned
+                                       .bottom 200
+                                       .child
+                                       (m/TapRegion
+                                        .consumeOutsideTaps true
+                                        .onTapOutside (fn [_]
+                                                        (.hide overlaycontroller))
+                                        .child (m/Card
+                                                .elevation 4.0
+                                                .child
+                                                (model/outline
+                                                 (f/widget
+                                                  :padding {:vertical 12
+                                                            :horizontal 12}
+                                                  :get [m/MediaQuery]
+                                                  (m/SizedBox
+                                                   .width (- (.-width (.-size media-query))
+                                                             100))
+
+                                                  m/Column
+                                                  .children
+                                                  [(m/Align
+                                                    .alignment m/Alignment.bottomLeft
+                                                    .child (m/Text "Every note is a template!"
+                                                                   .style (.-titleMedium tthm)))
+                                                   (m/SizedBox .height 8)
+                                                   (m/Align
+                                                    .alignment m/Alignment.bottomLeft
+                                                    .child (m/Text "Reuse sections and tags from old notes by cloning them. Give it a try!"))
+                                                   (m/Row
+                                                    .children [(m/Text "Clone icon: ")
+                                                               (m/Icon m/Icons.copy_all)])])
+                                                 0.1 2 20)))))
+                                    .child
+                                    (m/Text "Reuse content"))))]
+      (m/Column
+       .mainAxisSize m/MainAxisSize.min
+       .crossAxisAlignment m/CrossAxisAlignment.start
+       .mainAxisAlignment m/MainAxisAlignment.end
+       .children
+       [(model/outline button)
+        (m/SizedBox
+         .width button-size
+         .child (tutorial/example-notes-popup false))
+
+        (m/SizedBox
+         .width button-size
+         .child
+         (m/ElevatedButton.icon
+          .label (m/Text "Hide intro")
+          .icon (m/Icon m/Icons.clear)
+          .onPressed (fn []
+                       (rd/dispatch [::model/update-user-options
+                                     {"video_tutorial" true}])
+                       (rd/dispatch [::model/fetch-user-options])
+                       (reset! *svt? true)
+                       (model/snackbar scaffold-messenger
+                                       "Can be found again in settings!"))))])))
+
+    (and
+     (not (model/user-is-anonymous))
+     (not verified?))
+    (m/SliverFillRemaining
+     .child
+     (m/Align
+      .alignment m/Alignment.bottomCenter
+      .child (f/widget
+              :padding {:top 10
+                        :bottom 20}
+              (m/ElevatedButton
+               .onPressed
+               (fn []
+                 (-> ctx go_router/GoRouterHelper
+                     (.pushNamed
+                      "verify-email"))
+                 nil)
+               .child (m/Text "Verify email!")))))
+
+    :else (m/SliverVisibility
+           .visible false
+           .sliver (m/SliverFillRemaining
+                    .child (m/Text "how did this happen")))))
+
+(defn archive? [view-archive]
+  (m/SliverVisibility
+   .visible (boolean view-archive)
+   .sliver
+   (m/SliverToBoxAdapter
+    .child (m/Column
+            .children
+            [(f/widget
+              :get {{tthm .-textTheme} m/Theme}
+
+              :padding {:horizontal 10}
+              (m/Text "Archive"
+                      .style (.-titleLarge tthm)))
+             (f/widget
+              :padding {:horizontal 15}
+              (m/Text "Long press to delete notes.
+Swipe to restore from archive.
+Leave using the properties menu top right"))
+             (m/SizedBox .height 10)]))))
+
+(defn reorder-pinned-tags [ctx tags]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :watch [user-stream (when-let [uid  (model/uid)]
+                          (.snapshots
+                           (.doc
+                            (.collection FirebaseFirestore.instance "users")
+                            uid)))]
+
+    :let [pinned-tags
+          (if-let [parsed (model/firestore-stream->map user-stream)]
+            (or (parsed "pinned-tags") [])
+            [])]
+
+    :watch [ptags (atom pinned-tags) :as *ptags]
+
+    (m/AlertDialog
+     .content
+     (m/Container
+      .height 200
+      .width 300
+      .child
+      (m/ReorderableListView
+       .shrinkWrap true
+       .onReorder (fn [old-index new-index]
+                    (let [x (model/vec-move pinned-tags old-index
+                                            (if (< old-index new-index)
+                                              (dec new-index)
+                                              new-index))
+                          db FirebaseFirestore.instance
+                          ref (.doc
+                               (.collection db "users")
+                               (model/uid))]
+                      (reset! *ptags x)
+                      (await (.set ref {"pinned-tags" x}))))
+
+       .children (map-indexed
+                  (fn [i tag]
+                    (f/widget
+                     :key (str tag)
+                     (m/ReorderableDragStartListener
+                      .index i
+                      .child
+                      (m/ListTile
+                       .title (m/Text tag)
+                       .trailing (m/Icon m/Icons.drag_indicator)))))
+                  ptags)))
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Cancel"))
+               (m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Ok"))]))))
+
+(defn pin-tag [ctx tag]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :watch [all-notes (rd/subscribe [::model/get-notes])]
+    :watch [user-stream (when-let [uid  (model/uid)]
+                          (.snapshots
+                           (.doc
+                            (.collection FirebaseFirestore.instance "users")
+                            uid)))]
+
+    :let [pinned-tags (into #{}
+                            (if-let [parsed (model/firestore-stream->map user-stream)]
+                              (or (parsed "pinned-tags") [])
+                              []))]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(if (pinned-tags tag)
+         (m/TextButton
+          .onPressed (fn []
+                       (let [db FirebaseFirestore.instance
+                             ref (.doc
+                                  (.collection db "users")
+                                  (model/uid))]
+
+                         (await (.set ref {"pinned-tags"
+                                           (FieldValue.arrayRemove [tag])}
+                                      (SetOptions .merge true)))
+                         (.pop navigator)))
+          .child (m/Text "Unpin tag"))
+
+         (m/TextButton
+          .onPressed (fn []
+                       (let [db FirebaseFirestore.instance
+                             ref (.doc
+                                  (.collection db "users")
+                                  (model/uid))]
+
+                         (await (.set ref {"pinned-tags"
+                                           (FieldValue.arrayUnion [tag])}
+                                      (SetOptions .merge true)))
+                         (.pop navigator)))
+          .child (m/Text "Pin tag")))
+
+       (m/TextButton
+        .onPressed (when (> (count pinned-tags) 1)
+                     (fn []
+                       (.pop navigator)
+                       (reorder-pinned-tags ctx pinned-tags)))
+        .child (m/Text (if (> (count pinned-tags) 1)
+                         "Reorder pinned tags"
+                         "Reorder pinned tags (not enough tags)")))
+
+       (m/TextButton
+        .child (m/Text "Remove this tag from all notes")
+        .onPressed (fn []
+                     (popup/confirm
+                      ctx
+                      "Delete this tag from ALL notes? This can not be undone."
+                      (fn []
+                        (let [new-notes (mapv (fn [note]
+                                                (update note :tags
+                                                        (fn [tags]
+                                                          (into []
+                                                                (filter #(not= tag %))
+                                                                tags))))
+                                              all-notes)]
+
+                          (rd/dispatch [::model/save-notes-event-fx new-notes])
+                          (rd/dispatch [::model/refresh-notes]))
+                        (.pop navigator)))))])
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Done"))]))))
+
+(def tutorial-text-note-count 3)
+(def min-left 300)
+
+(defn expanded-searchbar [*notes saved-notes *expanded-searchbar id->saved-notes-index selected-tags *selected-tags search-focus saved-notes-strings]
+  (f/widget
+   :watch [filter-by-section (rd/subscribe [::model/filter-by-section])]
+   :padding {:bottom 12}
+   :get [m/ScaffoldMessenger :search-tc]
+   m/Card
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.start
+    .children
+    [(m/IconButton
+      .icon (m/Icon m/Icons.arrow_left)
+      .onPressed
+      (fn []
+        (.-text! search-tc "")
+        (reset! *notes saved-notes)
+        (swap! *expanded-searchbar not)))
+
+     (f/widget
+      :padding {:horizontal 24}
+      (m/Align
+       .alignment m/Alignment.centerLeft)
+      (m/ConstrainedBox
+       .constraints (m/BoxConstraints
+                     .maxWidth 300))
+      (m/TextField
+       .focusNode search-focus
+       .autofocus true
+       .decoration (m/InputDecoration
+                    .labelText "Search all text")
+
+       .controller search-tc
+       .onChanged (fn [text]
+                    (reset! *notes
+                            (filter-notes text
+                                          saved-notes
+                                          id->saved-notes-index
+                                          selected-tags
+                                          filter-by-section
+                                          scaffold-messenger
+                                          saved-notes-strings))
+                    nil)))
+
+     (f/widget
+      :watch [{:keys [all-tags]} (rd/subscribe [::model/all-tags-sub])]
+      :padding {:left 24
+                :vertical 12}
+      :managed [tag-tc (m/TextEditingController)
+                focus-node (m/FocusNode)]
+      (m/Autocomplete
+       .textEditingController tag-tc
+       .focusNode focus-node
+       .onSelected (fn [tag]
+                     (swap! *selected-tags #(conj % tag))
+                     (.-text! tag-tc "")
+                     (model/unfocus-then-run
+                      nil)
+                     nil)
+
+       .fieldViewBuilder
+       (fn [_ tag-tc focus-node on-submitted]
+         (f/widget
+          :padding {:bottom 12}
+          (m/Align
+           .alignment m/Alignment.centerLeft)
+          (m/ConstrainedBox
+           .constraints (m/BoxConstraints
+                         .maxWidth 300))
+          (m/TextField
+           .onTapOutside (fn [_]
+
+                           (model/unfocus-then-run
+                            nil))
+           .decoration (m/InputDecoration
+                        .labelText "Search for tag")
+           .controller tag-tc
+           .focusNode focus-node
+           .onSubmitted (fn [tag]
+                          (on-submitted)))))
+
+       .optionsViewBuilder (fn [ctx on-selected options]
+                             (f/widget
+                              :watch [height-factor (atom 0.0) :as *height-factor
+                                      visible? (atom true) :as *visible?]
+                              :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                                           (fn [_]
+                                             (reset! *height-factor 1.0))) :dispose nil]
+
+                              :animate [height-factor height-factor
+                                        :duration (Duration .milliseconds 150)
+                                        :curve m/Curves.ease]
+                              (m/ConstrainedBox
+                               .constraints (m/BoxConstraints .maxWidth 300
+                                                              .maxHeight 300))
+                              (m/TapRegion
+                               .onTapOutside (fn [_]
+                                               (reset! *visible? false)))
+                              (m/Visibility
+                               .visible visible?)
+                              m/Card
+                              (m/ListView.builder
+                               .shrinkWrap true
+                               .itemCount (count options)
+                               .itemBuilder (fn [_ i]
+                                              (m/TextButton
+                                               .child
+                                               (m/Align
+                                                .alignment m/Alignment.centerLeft
+                                                .heightFactor height-factor
+                                                .child
+                                                (m/Text (nth options i)
+                                                        .maxLines 1
+                                                        .overflow m/TextOverflow.ellipsis))
+
+                                               .onPressed (fn []
+                                                            ;;This inserts into the textbox
+                                                            (on-selected (nth options i))))))))
+       .optionsBuilder
+       (fn [^m/TextEditingValue {:flds [text]}]
+         (let [^#/(Iterable String) result
+               (into []
+                     (filter (fn [^String x]
+                               (string/includes? x text))
+                             all-tags))]
+           result))))])))
+
+(defn ondismiss [view-archive
+                 m
+                 scaffold-messenger]
+  (if view-archive
+    (rd/dispatch
+     [::model/save-note
+      {:note (dissoc m :archived)}])
+
+    (rd/dispatch
+     [::model/save-note
+      {:note (assoc m :archived true)}]))
+
+  (rd/dispatch
+   [::model/refresh-notes])
+
+  (.showSnackBar
+   scaffold-messenger
+   (m/SnackBar
+    .content (m/Text (if view-archive
+                       "Item removed from archive. Undo?"
+                       "Item archived. See three dots top right."))
+    .action
+    (m/SnackBarAction
+     .label "Undo"
+     .onPressed
+     (fn []
+       (rd/dispatch [::model/save-note {:note m}])
+       (rd/dispatch [::model/refresh-notes]))))))
+
+(defn filterchip [tag selected-tags *selected-tags tthm]
+  (f/widget
+   :padding {:right 4
+             :bottom 4}
+   :context ctx
+   (m/InkWell
+    .customBorder (m/RoundedRectangleBorder
+                   .borderRadius theme/border-radius)
+
+    .onLongPress
+    (fn []
+      (pin-tag ctx tag)))
+   (m/FilterChip.elevated
+    .elevation 0
+    .selected (contains? selected-tags tag)
+    ;; .shape (m/RoundedRectangleBorder
+    ;;         .borderRadius (m/BorderRadius.circular 15))
+    ;; .side (m/BorderSide
+    ;;        .style (m/BorderStyle.none))
+
+    .label  (m/Text (str tag))
+    .onSelected (fn [selected?]
+                  (if selected?
+                    (swap! *selected-tags #(conj % tag))
+                    (swap! *selected-tags #(disj % tag)))))))
+
+(defn section-filtering-menu []
+  (f/widget
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   :get {{cs .-colorScheme} m/Theme}
+   :get {{hcolor .-highlightColor} m/Theme}
+
+   :watch [filter-by-section (rd/subscribe [::model/filter-by-section])]
+   (m/AnimatedCrossFade
+    .crossFadeState (if filter-by-section
+                      m/CrossFadeState.showFirst
+                      m/CrossFadeState.showSecond)
+
+    .duration (Duration .milliseconds 300)
+
+    .firstChild  (m/IconButton
+                  .icon (m/Icon m/Icons.table_rows_outlined
+                                .size 48
+                                .color hcolor)
+                  .onPressed (fn []
+                               (rd/dispatch [::model/set-key :filter-by-section
+                                             nil])))
+    .secondChild (m/PopupMenuButton
+                  .icon (m/Icon m/Icons.filter_list
+                                .color (.-onSurfaceVariant cs))
+                  .key (m/ValueKey "small")
+                  .tooltip "Filter by section type"
+                  .itemBuilder (fn [_]
+                                 #dart ^m/PopupMenuEntry
+                                  [(m/PopupMenuItem
+                                    .enabled false
+                                    .value "_"
+                                    .child (m/Text "Filter by section"
+                                                   .style (.-bodyMedium tthm)))
+
+                                   (m/PopupMenuItem
+                                    .value "list"
+                                    .child (m/Text "List"))
+
+                                   (m/PopupMenuItem
+                                    .value "voice"
+                                    .child (m/Text "Voice"))
+
+                                   (m/PopupMenuItem
+                                    .value "table2"
+                                    .child (m/Text "Table"))
+
+                                   (m/PopupMenuItem
+                                    .value "reminder"
+                                    .child (m/Text "Reminder"))
+
+                                   (m/PopupMenuItem
+                                    .value "timer"
+                                    .child (m/Text "Timer"))
+
+                                   (m/PopupMenuItem
+                                    .value "alarm"
+                                    .child (m/Text "Alarm"))
+
+                                   (m/PopupMenuItem
+                                    .value "location"
+                                    .child (m/Text "Location"))
+
+                                   (m/PopupMenuItem
+                                    .value "media2"
+                                    .child (m/Text "Media"))])
+                  .onSelected (fn [selection]
+                                (rd/dispatch [::model/set-key :filter-by-section (if (= selection "all")
+                                                                                   nil
+                                                                                   selection)])
+
+                                nil)))))
+
+;; (defn properties-menu []
+;;   (f/widget
+;;    :context ctx
+;;    :watch [view-archive (rd/subscribe [::model/watch-view-archive])
+;;            note-sorting (rd/subscribe [::model/watch-note-sorting])]
+;;    :padding {:right 12}
+;;    :get {{cs .-colorScheme} m/Theme}
+
+;;    (m/MenuAnchor
+
+;;     .builder (fn [ctx controller menuChildren]
+;;                 (m/IconButton
+;;                  .onPressed (fn []
+;;                               (if (.-isOpen controller)
+;;                                 (.close controller)
+;;                                 (.open controller)))
+;;                  .icon (m/Icon m/Icons.more_vert
+;;                                .color (.-onSurfaceVariant cs))))
+
+;;     .menuChildren [(m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (-> ctx go_router/GoRouterHelper
+;;                                    (.push
+;;                                     "/settings"))
+;;                                  nil)
+;;                      .child (m/ListTile
+;;                              .title (m/Text "Settings")))
+
+;;                     (m/MenuItemButton
+;;                      .onPressed (fn []
+;;                                   (rd/dispatch [::model/set-key
+;;                                             :view-archive
+;;                                             (not view-archive)]))
+;;                      .child (m/ListTile
+;;                              .title(m/Text (if view-archive
+;;                                              "Hide archive"
+;;                                              "View archive"))))
+
+;;                    ;; (m/MenuItemButton
+;;                    ;;   .onPressed (fn []
+;;                    ;;                (encrypted-note ctx))
+;;                    ;;   .child (m/Text "Encrypted"))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (rd/dispatch [::model/refresh-notes]))
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Reload notes")))
+
+;;                     ;; (m/PopupMenuItem
+;;                     ;;  .value "encrypted"
+;;                     ;;  .child (m/Text "Create encrypted note"))
+
+;;                     ;; (m/MenuItemButton
+;;                     ;;  .onPressed (fn []
+;;                     ;;               (rd/dispatch [::model/set-key
+;;                     ;;                        :note-sorting
+;;                     ;;                        (if note-sorting
+;;                     ;;                          nil
+;;                     ;;                          :created_at)]))
+;;                     ;;  .child (m/ListTile
+;;                     ;;          .title (m/Text
+;;                     ;;                 (if note-sorting
+;;                     ;;                   "Sort by date created"
+;;                     ;;                   "Sort by date modified"))))
+;;                    ])))
+
+(defn properties-menu []
+  (f/widget
+   :context ctx
+   :watch [view-archive (rd/subscribe [::model/watch-view-archive])
+           note-sorting (rd/subscribe [::model/watch-note-sorting])]
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+   :watch [prefs (rd/subscribe [::model/prefs])
+           saved-notes (rd/subscribe [::model/get-notes])]
+
+   :managed [has-read-news? (or
+                             (< (count saved-notes) 5)
+                             (and
+                              (some? (prefs "last_read_news"))
+                              (.isAfter
+                               (.toDate (prefs "last_read_news"))
+                               (DateTime.utc 2026 03 12)))) :dispose nil]
+   :padding {:right 4}
+   :get {{cs .-colorScheme} m/Theme}
+
+   (m/PopupMenuButton
+    .clipBehavior m/Clip.antiAlias
+    .tooltip "Settings"
+    .child (if has-read-news?
+             (m/Icon m/Icons.more_vert)
+             (model/outline (m/Icon m/Icons.more_vert)))
+    .itemBuilder (fn [_]
+                   #dart ^m/PopupMenuEntry
+                    [(m/PopupMenuItem
+                      .value "settings"
+                      .child (m/ListTile
+                              .title (m/Text "Settings")))
+
+                     (m/PopupMenuItem
+                      .value "archive"
+                      .child (m/ListTile
+                              .title (m/Text (if view-archive
+                                               "Hide archive"
+                                               "View archive"))))
+
+                     (m/PopupMenuItem
+                      .value "refresh"
+                      .child (m/ListTile
+                              .title (m/Text "Reload notes")))
+
+                     (m/PopupMenuItem
+                      .value "news"
+                      .child (if has-read-news?
+                               (m/ListTile
+                                .title (m/Text "News"))
+
+                               (model/outline
+                                (f/widget
+                                 :padding {:left 12}
+                                 (m/ListTile
+                                  .title  (m/Text "News"))))))
+
+;; (m/PopupMenuItem
+                    ;;  .value "encrypted"
+                    ;;  .child (m/Text "Create encrypted note"))
+
+                    ;; (m/PopupMenuItem
+                    ;;  .value "sortby"
+                    ;;  .child (m/Text
+                    ;;          (if note-sorting
+                    ;;            "Sort by Date created"
+                    ;;            "Sort by Date modified")))
+                     ])
+    .onSelected (fn [selection]
+                  (case selection
+                    "sortby" (rd/dispatch [::model/set-key
+                                           :note-sorting
+                                           (if note-sorting
+                                             nil
+                                             :created_at)])
+                    "news" (do
+                             (rd/dispatch [::model/update-user-options
+                                           {"last_read_news" (DateTime.now)}])
+                             (show-news ctx))
+                    "refresh" (rd/dispatch [::model/refresh-notes])
+                    "archive" (rd/dispatch [::model/set-key
+                                            :view-archive
+                                            (not view-archive)])
+                    "settings" (-> ctx go_router/GoRouterHelper
+                                   (.push
+                                    "/settings")))
+                  nil))))
+
+(def expanded-searchbar-animation-duration 170)
+(defn appbar
+  "Not actually an appbar since that ruins the edit view, since it's on the same page now."
+  [selected-tags expanded-searchbar? *expanded-searchbar *notes
+   saved-notes *selected-tags]
+  (f/widget
+   :watch [premium? (rd/subscribe [::model/premium?])]
+   :get {{cs .-colorScheme} m/Theme}
+   :watch [prefs (rd/subscribe [::model/prefs])]
+
+   :context ctx
+   (m/Row
+    .children
+    (concat
+     [(m/Expanded
+       .child
+       (f/widget
+        :managed [search-focus (m/FocusNode)]
+        :watch [saved-notes-strings (atom nil) :as *saved-notes-strings]
+        :watch [saved-notes (rd/subscribe [::model/get-notes])
+                id->saved-notes-index (rd/subscribe [::model/id->saved-notes-index])]
+                                        ;        :key "animated-seachbar"
+        (m/AnimatedCrossFade
+         .duration (Duration .milliseconds expanded-searchbar-animation-duration)
+
+         .crossFadeState (if expanded-searchbar?
+                           m/CrossFadeState.showFirst
+                           m/CrossFadeState.showSecond)
+         .firstChild (f/widget
+                      :padding {:left 8}
+                      (m/Align
+                       .alignment m/Alignment.bottomLeft)
+
+                      (m/Row
+                       .mainAxisAlignment m/MainAxisAlignment.start
+                       .children
+                       [(m/Flexible
+                         .child (m/Tooltip
+                                 .message "Search in notes, both text and sections."
+                                 .child (m/IconButton
+                                         .color (.-onSurfaceVariant cs)
+                                         .icon (m/Icon m/Icons.search)
+                                         .onPressed (fn []
+                                                      (swap! *expanded-searchbar not)
+                                                      (reset! *saved-notes-strings
+                                                              (searchable-notes saved-notes))
+                                                      ;;Let the animation play before focus
+                                                      (Future/delayed
+                                                       (Duration
+                                                        .milliseconds
+                                                        (+ 5 expanded-searchbar-animation-duration))
+                                                       (fn []
+                                                         (.requestFocus search-focus)))
+                                                      nil))))
+                        (m/Tooltip
+                         .message
+                         "Only show notes with section..."
+                         .child (section-filtering-menu))]))
+         .secondChild (expanded-searchbar *notes saved-notes *expanded-searchbar  id->saved-notes-index selected-tags *selected-tags search-focus saved-notes-strings))))]
+
+     (when  expanded-searchbar?
+       (concat
+        [(m/IconButton
+          .tooltip "Reminders"
+          .icon (m/Icon m/Icons.notifications_outlined)
+          .onPressed (fn []
+                       (-> ctx go_router/GoRouterHelper
+                           (.push
+                            "/reminders"))
+                       nil))]
+
+        (when kIsWeb
+          [(m/Tooltip
+            .message "Refresh all notes"
+            .child
+            (m/IconButton
+             .onPressed (fn []
+                          (rd/dispatch [::model/refresh-notes])
+                          nil)
+             .icon (m/Icon m/Icons.refresh)))])
+        [(m/Flexible
+          .flex 0
+          .child (properties-menu))]))))))
+
+(defn click-me-button
+  "I often want to trigger some logic easily and that can be done here."
+  []
+  (f/widget
+   :context ctx
+   :watch [notes (rd/subscribe [::model/get-notes])]
+   (m/OutlinedButton
+    .onPressed
+    (fn []
+      
+       (mapv model/valid-note? notes)
+      )
+
+    .child (m/Text (str "Click me")))))
+
+(defn tag-chips [selected-tags *selected-tags]
+  (m/SliverToBoxAdapter
+   .child
+   (f/widget
+    :watch [review-available? (.isAvailable (.instance review/InAppReview))
+            note-id-to-open? (rd/subscribe [::model/watch-note-to-open])
+            saved-notes (rd/subscribe [::model/get-notes])
+            premium? (rd/subscribe [::model/premium?])]
+
+    :bg-watcher ([user-stream (when-let [uid  (model/uid)]
+                                (.snapshots
+                                 (.doc
+                                  (.collection FirebaseFirestore.instance "users")
+                                  uid)))]
+
+                 (let [pinned-tags (when-let [parsed (model/firestore-stream->map user-stream)]
+                                     (parsed "pinned-tags"))]
+
+                   (when (seq pinned-tags)
+                     (rd/dispatch [::model/set-key :pinned-tags pinned-tags]))))
+
+    :watch [{:keys [all-tags intersecting-tags]} (rd/subscribe [::model/all-tags-sub])]
+    :get {{tthm .-textTheme} m/Theme}
+    :context ctx
+    :managed [_ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                     (fn [_]
+                       (when (and (not premium?) kIsWeb (not kDebugMode))
+                         (web-premium-popup ctx))
+
+                       (when (< 8 (count saved-notes))
+                         (when (and review-available?
+                                    (not kDebugMode)
+                                    (not kIsWeb))
+                           (.requestReview
+                            (.instance review/InAppReview))
+                           nil))
+
+                       (let [at (into #{} all-tags)]
+
+                         ;;If the user has an e.g recipe tag and deletes all recipe notes,
+                         ;;the recipe tag will be removed from the UI but won't be
+                         ;;removed from the filters unless we do this.
+                         ;;So this has to be done otherwise the user can't deselect the tag.
+                         (when (seq (clojure.set/difference selected-tags at))
+                           (reset! *selected-tags #{})))
+
+                       (when note-id-to-open?
+                         (rd/dispatch [::model/set-current-note-id note-id-to-open?]))))
+                    nil) :dispose nil]
+
+    (m/AnimatedSwitcher
+     .duration (Duration .milliseconds 200)
+     .child
+     (f/widget
+      :key (count selected-tags)
+      (m/Align
+       .alignment m/Alignment.bottomLeft)
+
+      (f/widget
+       :padding {:left 4}
+       :managed [children (concat
+                           (when (seq selected-tags)
+                             [(m/IconButton
+                               .icon (m/Icon m/Icons.clear)
+                               .onPressed (fn []
+                                            (reset! *selected-tags #{})))])
+                           (keep (fn [t]
+                                   ;;to show a tag:
+                                   (when (or
+                                          (empty? selected-tags)
+
+                                          ;;ALL TAGS in selected-tags MUST have t as an intersecting-tag
+                                          (every? (fn [selected-tag]
+                                                    (let [intersecting
+                                                        ;;intersecting tags is a map that takes a tag and returns all tags that it is in a note with
+                                                          (intersecting-tags selected-tag)]
+                                                      (intersecting t)))
+                                                  selected-tags))
+                                     (filterchip t selected-tags *selected-tags tthm)))
+                                 all-tags))
+                 :refresh-on [selected-tags all-tags]
+                 :dispose nil]
+
+       (m/SizedBox
+        .height (if (seq children) 48 0)
+        .child (m/ListView.builder
+                .scrollDirection m/Axis.horizontal
+                .shrinkWrap true
+                .itemCount (count children)
+                .itemBuilder (fn [_ i]
+                               (nth children i))))))))))
+
+(defn shared-note [m]
+  (let [emails (map (fn [[_ email]] email) (:user_emails m))]
+    (f/widget
+     :context ctx
+     :get [m/Navigator]
+     .child
+     (m/ElevatedButton.icon
+      .onPressed (fn []
+                   (popup/show-collaborators (apply str emails) ctx)
+                   nil)
+      .icon (m/Icon m/Icons.group)
+      .label (m/Text "Shared")))))
+
+(defn- clone-button-onpressed [saved-notes ctx  ^m/ScaffoldMessengerState scaffold-messenger m  premium?]
+  (fn []
+    (let [new-note (await (utils/clone-note m scaffold-messenger premium?))]
+      (when new-note
+        (rd/dispatch [::model/upload-note  [new-note true]])
+        (rd/dispatch
+         [::model/set-current-note-id (:id new-note)])
+
+        (-> ctx go_router/GoRouterHelper
+            (.pushNamed  "edit"
+                         .pathParameters {"id" (:id new-note)}
+                         .extra {:autofocus false}))
+        (rd/dispatch [::model/set-new-plaintext ""])
+        (rd/dispatch [::model/set-key :override-title ""])
+        (.showSnackBar scaffold-messenger
+                       (m/SnackBar
+                        .persist false
+                        .content (m/Text "Copy content from parent?")
+                        .action
+                        (m/SnackBarAction
+                         .label "Yes"
+                         .onPressed
+                         (fn []
+                           (rd/dispatch [::model/update-current-note
+                                         (fn [n]
+                                           (let [pt (utils/get-new-plaintext (:plaintext m))]
+
+                                             (rd/dispatch [::model/set-new-plaintext pt])
+                                             (rd/dispatch [::model/set-key :override-title (:title m)])
+                                             (assoc n
+                                                    :title (:title m)
+                                                    :sections (utils/reset-checkboxes m)
+                                                    :plaintext pt)))])))))))
+    nil))
+
+(defn cloning-popup [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .children
+      [(m/Icon m/Icons.copy_all
+               .size 40)
+       (m/SizedBox .height 12)
+       (m/Center
+        .child
+        (m/Text "Many notes are similar to each other, for example most recipes contain a table of ingredients.
+
+Use cloning to copy over sections and tags to a new note."))])
+     .actions
+     [(m/TextButton
+       .child (m/Text "Ok")
+       .onPressed (fn []
+                    (.pop navigator)))]))))
+
+(defn clone-button [ctx m plaintext]
+  (f/widget
+   :watch [saved-notes (rd/subscribe [::model/get-notes])
+           premium? (rd/subscribe [::model/premium?])]
+   :get [m/ScaffoldMessenger]
+   :get {{cs .-colorScheme} m/Theme}
+
+   (m/Tooltip
+    .message "Clone"
+    .child (m/IconButton
+            .onPressed (clone-button-onpressed saved-notes ctx scaffold-messenger m premium?)
+            .onLongPress (fn []
+                           (cloning-popup ctx))
+            .icon
+            (m/Icon m/Icons.copy_all
+                    .color (.-onSurfaceVariant cs))))))
+
+(defn start-of-day [now]
+  (.subtract now (Duration
+                  .hours (.-hour now)
+                  .minutes (.-minute now)
+                  .seconds (.-second now))))
+
+(defn group-notes-by-period [notes]
+  (let [now (DateTime.now)
+        today-start (start-of-day now)
+        yesterday-start (.subtract today-start (Duration .days 1))
+        week-start (.subtract today-start (Duration .days (.weekday now)))
+        last-week-start (.subtract week-start (Duration .days 7))
+        fmt (intl/DateFormat "MMMM")
+
+        groups (group-by (fn [note]
+                           (let [updated (:updated_at note)]
+                             (cond
+                               (.isAfter updated today-start) "Today"
+                               (.isAfter updated week-start) "This week"
+                               :else (.format fmt updated)))) notes)
+
+        recent-periods [["Today" (groups "Today")]
+                        ["This week" (groups "This week")]]
+
+        month-groups (->> (dissoc groups "Today" "This week")
+                          (map (fn [[month-key month-notes]]
+                                 [month-key month-notes (-> month-notes first :updated_at)]))
+                          (sort-by #(nth % 2) (fn [a b] (.isAfter a b)))
+                          (map (fn [[month-key month-notes _]] [month-key month-notes])))]
+
+    (->> (concat recent-periods month-groups)
+         (filter (fn [[_ notes]] (seq notes)))
+         (into []))))
+
+(defn divider [cs]
+  (f/widget
+   :color (.-surfaceContainerHigh cs)
+
+   :padding {:vertical 0
+             :horizontal 12}
+   :color (.-surfaceContainerHigh cs)
+
+   (m/Divider
+    .height 0
+    .thickness 0.6
+    .color (.-onTertiary cs))))
+
+(defn show-note-grid [{:keys [id] :as note}   prefs first? last?]
+  (f/widget
+   :watch [view-archive (rd/subscribe [::model/watch-view-archive])
+           batch-delete-notes (rd/subscribe [::model/batch-delete-notes])]
+
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :get {{cs .-colorScheme} m/Theme}
+
+   :get [m/ScaffoldMessenger m/Navigator]
+   :padding {:horizontal 12}
+   :get [:timeformat-24-hours?]
+   :managed [radius (m/Radius.circular 17) :dispose nil
+             border (m/RoundedRectangleBorder
+                     .borderRadius (cond
+                                     (and first? last?) (m/BorderRadius.all radius)
+                                     first? (m/BorderRadius.only .topLeft radius
+                                                                 .topRight radius)
+
+                                     last? (m/BorderRadius.only .bottomLeft radius
+                                                                .bottomRight radius)
+
+                                     :else (m/BorderRadius.all (m/Radius.circular 0))))
+             :dispose nil]
+   (Slidable
+    .startActionPane
+    (ActionPane
+     .motion (fs/DrawerMotion)
+     .children
+     [(fs/SlidableAction
+       .borderRadius theme/border-radius
+       .onPressed (fn [_]
+                    (ondismiss view-archive note scaffold-messenger))
+       .icon m/Icons.archive
+       .label "Archive")
+
+      (fs/SlidableAction
+       .borderRadius theme/border-radius
+
+       .onPressed (fn [_]
+                    (rd/dispatch [::model/save-note
+                                  {:note (if (:pin note)
+                                           (dissoc note :pin)
+                                           (assoc note :pin (DateTime.now)))}]))
+       .icon (if (:pin note)
+               m/Icons.push_pin
+               m/Icons.push_pin_outlined)
+
+       .label (if (:pin note)
+                "Unpin"
+                "Pin"))])
+    .child
+    (m/Card
+     .shape border
+     .margin m/EdgeInsets.zero
+     .elevation 0
+     .child
+     (m/InkWell
+      .customBorder border
+      .onLongPress (fn []
+                     (model/unfocus-then-run
+                      (rd/dispatch [::model/set-key :current-note-id nil])
+
+                      (rd/dispatch [::model/add-batch-delete-note id])))
+
+      .onTap
+      (fn []
+        (if (seq batch-delete-notes)
+          (do (if (contains? batch-delete-notes id)
+                (rd/dispatch [::model/remove-batch-delete-note id])
+                (rd/dispatch [::model/add-batch-delete-note id])))
+
+          (-> ctx go_router/GoRouterHelper
+              (.pushNamed "edit"
+                          .pathParameters {"id" (:id note)}
+                          .extra {:autofocus false})))
+        nil)
+      .child
+      (f/widget
+       :padding {:left 16
+                 :right 0
+                 :top 12
+                 :bottom 12}
+
+       (m/Column
+        .children
+        (concat
+         [(m/Row
+           .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+           .crossAxisAlignment m/CrossAxisAlignment.center
+           .children
+           (concat
+            (when (seq batch-delete-notes)
+              [(m/Checkbox
+                .value (contains? batch-delete-notes id)
+                .onChanged (fn [b]
+                             (if b
+                               (rd/dispatch [::model/add-batch-delete-note id])
+                               (rd/dispatch [::model/remove-batch-delete-note id]))))])
+
+            [(m/Flexible
+              .flex 10
+              .child
+              (f/widget
+               (m/Align
+                .alignment m/Alignment.bottomLeft)
+               (m/ConstrainedBox
+                .constraints (m/BoxConstraints
+                              .maxHeight 150))
+
+               (m/SingleChildScrollView
+                .physics (m/NeverScrollableScrollPhysics))
+
+               (if (:encrypted note)
+                 (f/widget
+                  :watch [password (rd/subscribe [::model/password])]
+                  (m/ListTile
+                   .trailing (if password
+                               (m/Icon m/Icons.lock_open)
+                               (m/Icon m/Icons.lock_outline))
+                   .title (m/Text (:title note)
+                                  .style (.-titleMedium tthm))))
+                 (grid/show-note note))))
+             (f/widget
+              :watch [user-data-stream (try (.snapshots
+                                             (.doc
+                                              (.collection FirebaseFirestore.instance "users")
+                                              (model/uid)))
+                                            (catch Exception e nil))]
+              :let [user-data (if user-data-stream
+                                (model/dart->clj-ds (.data user-data-stream))
+                                {})]
+
+              (m/Column
+               .children
+               (concat
+                [(clone-button ctx note (:plaintext note))]
+                (when (< 1 (count (:user_access note)))
+                  [(m/IconButton
+                    .icon (m/Icon m/Icons.people)
+                    .onPressed (fn []
+                                 (popup/note-shared
+                                  ctx
+                                  note
+                                  (user-data "friends"))))]))))]))]))))))))
+
+(defn filter-notes [text saved-notes  id->saved-notes-index selected-tags only-with-section scaffold-messenger saved-notes-strings]
+
+  (let [text (string/lower-case (if (= \u200b (first text))
+                                  (subs text 1)
+                                  text))]
+    (if saved-notes-strings ;;This implies that the user is doing a text search
+      (keep
+       (fn [[id s]]
+         (let [note (nth saved-notes (id->saved-notes-index id))
+               tags (set (:tags note))
+               tag-filtered? (every? tags selected-tags)]
+           (when (and tag-filtered?
+                      (string/includes? (string/lower-case s) text)
+                      (or (nil? only-with-section)
+                          (model/note-contains-section?
+                           note
+                           only-with-section)))
+             note)))
+       saved-notes-strings)
+      saved-notes)))
+
+(defn list-title [text tthm]
+  (f/widget
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+   :padding {:top 20
+             :bottom 12
+             :left 16}
+   (m/Text text
+           .style (.-titleLarge tthm))))
+
+(defn list-notes []
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/Theme]
+   :context ctx
+   :watch [{verified? .-emailVerified} (.userChanges FirebaseAuth.instance)
+           saved-notes (rd/subscribe [::model/get-notes])
+           view-archive (rd/subscribe [::model/watch-view-archive])
+           premium? (rd/subscribe [::model/premium?])
+           note-id-to-open? (rd/subscribe [::model/watch-note-to-open])
+           selected-tags (atom #{}) :as *selected-tags]
+
+   :watch [expanded-searchbar? (atom true) :as *expanded-searchbar]
+   :managed [search-tc (m/TextEditingController
+                        .text (str \u200b))]
+   :bind {:search-tc search-tc}
+
+   :get [m/ScaffoldMessenger]
+   :watch [{:keys [all-tags]} (rd/subscribe [::model/all-tags-sub])]
+
+   :watch [id->saved-notes-index (rd/subscribe [::model/id->saved-notes-index])
+           filter-by-section (rd/subscribe [::model/filter-by-section])
+
+           notes (atom (filter-notes (.-text search-tc)
+                                     saved-notes
+                                     id->saved-notes-index
+                                     selected-tags
+                                     filter-by-section
+                                     scaffold-messenger
+                                     nil)) :as *notes]
+
+   :watch [prefs (rd/subscribe [::model/prefs])
+
+           ;;Leave this here it makes colors update properly
+           brightness (rd/subscribe [::model/get-brightness])]
+
+   :watch [hide-vid-tutorial? (atom (or (prefs "video_tutorial") false)) :as *svt?]
+
+   :context ctx
+   :get {{cs .-colorScheme} m/Theme}
+   :managed [{pinned true
+              not-pinned false}
+             (group-by #(boolean (:pin %))
+                       (filter
+                        (fn [n]
+                          (if view-archive
+                            (n :archived)
+                            (not (n :archived)))) notes))
+             :dispose nil
+
+             not-pinned-notes
+             (flatten
+              (map (fn [[date-group notes]]
+                     (concat
+                      [(list-title date-group tthm)]
+                      (flatten (map-indexed
+                                (fn [i n]
+                                  (concat
+                                   [(show-note-grid
+                                     n
+                                     prefs
+                                     (= i 0)
+                                     (= i (dec (count notes))))]
+
+                                   (when (not= i (dec (count notes)))
+                                     [(divider cs)])))
+                                notes))))
+                   (group-notes-by-period not-pinned)))
+             :dispose nil
+
+             ;;Pinned-notes contains both the actual notes, as well as the
+             ;;pinned/unpinned icons.
+             pinned-notes (flatten (concat
+                                    [(list-title "Pinned" tthm)]
+                                    (when (seq pinned)
+                                      (map-indexed
+                                       (fn [i n]
+                                         (concat
+                                          [(show-note-grid
+                                            n
+                                            prefs
+                                            (= i 0)
+                                            (= i (dec (count pinned))))]
+                                          (when (not= i (dec (count pinned)))
+                                            [(divider cs)])))
+                                       pinned))))
+             :dispose nil
+
+             note-list (m/CustomScrollView
+                        .physics (m/ClampingScrollPhysics)
+                        .slivers
+                        [(m/SliverToBoxAdapter
+                          .child (appbar selected-tags expanded-searchbar? *expanded-searchbar *notes saved-notes *selected-tags))
+                         (archive? view-archive)
+
+                         (tag-chips selected-tags *selected-tags)
+                         (scheduled-alarms)
+                         (m/SliverVisibility
+                          ;;pinned-notes contain 2 items by default, the "pinned" icon and the
+                          ;;"unpinned" icon. So if count >= 3 then there is at least one pinned
+                          ;;note
+                          .visible (>= (count pinned-notes) 2)
+                          .sliver (m/SliverList
+                                   .delegate
+                                   (m/SliverChildBuilderDelegate
+                                    (fn [_ index]
+                                      (nth pinned-notes index))
+                                    .childCount  (count pinned-notes))))
+
+                         ;;Just for development.
+                         (m/SliverVisibility
+                          .visible (and true kDebugMode)
+                          .sliver (m/SliverToBoxAdapter
+                                   .child (click-me-button)))
+
+                         (m/SliverList
+                          .delegate
+                          (m/SliverChildBuilderDelegate
+                           (fn [_ index]
+                             (nth not-pinned-notes index))
+                           .childCount  (count not-pinned-notes)))
+
+                         (get-started saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm)])
+             :dispose nil
+             :refresh-on
+             [notes prefs hide-vid-tutorial? expanded-searchbar? verified? selected-tags saved-notes all-tags brightness not-pinned]]
+
+   ;; (m/GridPaper
+   ;;  .color m/Colors.red
+   ;;  .interval 100
+   ;;  .divisions 1)
+   (m/PopScope
+    .canPop (boolean (not view-archive))
+    .onPopInvokedWithResult (fn [_ _]
+                              (when view-archive
+                                (rd/dispatch [::model/set-key :view-archive false])))
+    .child
+
+    note-list)))

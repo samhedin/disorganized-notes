@@ -1,0 +1,1026 @@
+(ns disorganized.ui.popup
+  (:require
+   ["package:cloud_functions/cloud_functions.dart" :refer [FirebaseFunctions]]
+   ["package:alarm/alarm.dart" :refer [Alarm]]
+   ["package:disorganized_notes/timezone_initializer.dart" :as tzi]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+   [disorganized.prettyprint :as pp]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [cljd.flutter :as f]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   ["package:path/path.dart" :refer [basename]]
+   ["dart:io" :refer [File Directory]]
+   ["package:http/http.dart" :as http]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState Reference]]
+   [disorganized.ui.theme :as theme]
+   ["package:share_plus/share_plus.dart" :refer [Share]]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode]]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore FieldValue SetOptions]]
+   [clojure.walk :as w]
+   [clojure.set :refer [rename-keys]]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:disorganized_notes/firestore_db.dart" :as fdb]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+   ["dart:convert" :as c]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as model]
+   ["dart:core" :as dc]
+   ["package:flutter/material.dart" :as m]
+   [disorganized.model :as utils]
+   [clojure.string :as string]
+   ["package:flutter_timezone/flutter_timezone.dart" :refer [FlutterTimezone]]
+   ["package:timezone/timezone.dart" :as tz]
+   ["package:flutter/services.dart" :as svc]))
+
+(defn cancel []
+  (f/widget
+   :get [m/Navigator]
+   (m/TextButton
+    .onPressed #(.pop navigator)
+    .child (m/Text "Cancel"))))
+
+(defn confirm [ctx text f]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content (m/Text text)
+     .actions [(cancel)
+               (m/TextButton
+                .onPressed (fn []
+                             (f)
+                             (.pop navigator))
+
+                .child (m/Text "Yes"))]))))
+
+(defn delete-section
+  [ctx note-id section-id section *section-size]
+  (confirm ctx
+           "Really delete section?"
+           (fn []
+
+             (rd/dispatch [::model/reset-restructure-mode])
+             (reset! *section-size 0)
+             (Future/delayed
+              (Duration .milliseconds 500)
+              (fn []
+
+                (cond
+                  (= "reminder" (section "type"))
+                  (.deleteReminder
+                   (fdb/FirestoreDB)
+                   (model/uid)
+                   note-id
+                   section-id)
+
+                  (and (not kIsWeb)
+                       (or (= "alarm" (section "type"))
+                           (= "timer" (section "type"))))
+                  (await (Alarm.stop
+                          (.hashCode section-id))))
+
+                (rd/dispatch [::model/update-current-note
+                              (fn [m]
+                                (let [sections (:sections m)
+                                      section-to-delete (sections section-id)
+                                      index (section-to-delete "section-position")
+                                      sections-without (dissoc sections section-id)
+                                        ; Reindex sections with position > index
+                                      updated-sections (into {}
+                                                             (map (fn [[k v]]
+                                                                    (if (> (get v "section-position")
+                                                                           index)
+                                                                      [k (update v "section-position" dec)]
+                                                                      [k v]))
+                                                                  sections-without))]
+                                  (assoc m :sections updated-sections)))]))))))
+
+(defn remove-collaborator? [ctx user note]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :let [uid (model/uid)]
+    (m/AlertDialog.
+     .content
+     (m/Text (str (if (= uid user)
+                    "Remove yourself from this note?"
+                    "Remove user from this note?")))
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Cancel"))
+
+               (m/TextButton
+                .onPressed (fn []
+                             (println (:id note))
+                             (let [note' (update note :user_access
+                                                 (fn [users]
+                                                   (into []
+                                                         (filter #(not= user %) users))))]
+
+                               (rd/dispatch [::model/save-note {:note note'
+                                                                :update-created-at? false}])
+                               (rd/dispatch [::model/refresh-notes]))
+                             (.pop navigator))
+                .child (m/Text "Yes"))]))))
+
+(defn note-shared [ctx note friends]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :let [user_access (into #{} (:user_access note))
+          uid (model/uid)]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (concat
+       [(m/Text "Collaborators"
+                .style (.-titleMedium tthm))
+        (m/SizedBox .height 10)]
+
+       (mapv (fn [user]
+               (m/TextButton
+                .child (m/Text (if (= user uid)
+                                 (str "(you) " user)
+                                 user))
+                .onPressed
+                (fn []
+                  (when (or (= (:owner note) uid)
+                            (= user uid))
+                    (.pop navigator)
+                    (remove-collaborator? ctx user note)))))
+             user_access)))
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Ok"))]))))
+
+(defn update-reminder [section-name schedule  ^m/ScaffoldMessengerState scaffold-messenger start-date? end-date?]
+  (await (tzi/initializeTimeZones))
+  (let [ttt (await (FlutterTimezone.getLocalTimezone))
+        timezone (.-identifier ttt)
+        timezone' (try
+                    (tz/getLocation timezone)
+                    (catch Exception e
+                      nil))]
+
+    (if timezone'
+      (rd/dispatch
+       [::model/update-current-note
+        (fn [m]
+          (let [now (tz/TZDateTime.now timezone')
+                ^Timestamp date  (get-in m [:sections section-name "content" "datetime"])
+                notification-datetime (.toDate date)
+                local-datetime (tz/TZDateTime.from
+                                notification-datetime
+                                timezone')]
+
+            (println "current datetime " notification-datetime)
+            (println "local datetime" local-datetime)
+            (-> m
+                (assoc-in [:sections section-name "content" "timezone"] timezone)
+                (assoc-in
+                 [:sections section-name "content" "repeating"] schedule)
+                (#(if start-date?
+                    (assoc-in % [:sections section-name "content" "start-date"] start-date?)
+                    %))
+                (#(if end-date?
+                    (assoc-in % [:sections section-name "content" "end-date"] end-date?)
+                    %))
+
+                                        ;If the user has set a repeating schedule but
+                                        ;set the datetime before DateTime.now,
+                                        ;then the repeating schedule will not fire.
+                ;;Because the way it works is that a cloud function is run each
+                ;;minute, fetching all reminders for that minute.
+                ;;if a reminder has a repeating schedule, it
+                ;;then overwrites the reminder with the next reminder in the schedule.
+                ;;So we have to upload a future date.
+                (assoc-in [:sections section-name "content" "datetime"]
+                          (reduce
+                           (fn [^tz/TZDateTime acc _]
+                             (if (or (.isAfter acc now)
+                                     (= "none" schedule)
+                                     (nil? schedule))
+                               (reduced (Timestamp.fromDate
+                                         (.-native acc))) ;;This is a DateTime obj instead of TZDateTime
+                               (case schedule
+                                 "daily" (tz/TZDateTime.new
+                                          timezone'
+                                          (.-year acc)
+                                          (.-month acc)
+                                          (inc (.-day acc)))
+
+                                 "weekly" (tz/TZDateTime.new
+                                           timezone'
+                                           (.-year acc)
+                                           (.-month acc)
+                                           (+ (.-day acc) 7))
+
+                                 "monthly" (tz/TZDateTime.new
+                                            timezone'
+                                            (.-year acc)
+                                            (inc (.-month acc))
+                                            (.-day acc))
+
+                                 "yearly" (tz/TZDateTime.new
+                                           timezone'
+                                           (inc (.-year acc))
+                                           (.-month acc)
+                                           (.-day acc)))))
+                           local-datetime
+                           (range))))))])
+      (.showSnackBar scaffold-messenger
+                     (m/SnackBar
+                      .content (m/Text "Couldn't find timezone, aborting repeating schedule."))))))
+
+(defn set-repeating-popup [ctx section-name]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :get [:timeformat-24-hours?]
+
+    :watch [note (rd/subscribe [::model/current-note])]
+
+    :let [content (get-in note [:sections section-name "content"])
+          repeating (content "repeating")
+          start-date (content "start-date")
+          end-date (content "end-date")]
+
+    :watch [start-date (atom (try (.toDate start-date)
+                                  (catch NoSuchMethodError e
+                                    start-date))) :as *start-date
+            end-date (atom (try
+                             (.toDate end-date)
+                             (catch NoSuchMethodError e
+                               end-date))) :as *end-date
+
+            schedule (atom (string/capitalize (str repeating))) :as *schedule]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (concat
+       [(m/Text "Set repeat schedule"
+                .style (.-titleLarge tthm))
+
+        (m/SizedBox .height 10)
+
+        (m/TextButton
+         .child (m/Text (if start-date
+                          (str "Start date: " (df/DateFormatter.getVerboseDateTimeRepresentation start-date
+                                                                                                 timeformat-24-hours? .dateOnly true))
+                          "Set start date"))
+         .onPressed (fn []
+                      (let [date?
+                            (await (m/showDatePicker
+                                    .context ctx
+                                    .firstDate (DateTime.now)
+
+                                    .lastDate (if end-date
+                                                end-date
+                                                (.add (DateTime.now)
+                                                      (Duration .days (* 365 50))))))]
+
+                        (reset! *start-date date?)
+                        nil)))
+
+        (m/TextButton
+         .child (m/Text (if end-date
+                          (str "End date: " (df/DateFormatter.getVerboseDateTimeRepresentation end-date
+                                                                                               timeformat-24-hours? .dateOnly true))
+                          "Set end date"))
+         .onPressed (fn []
+                      (let [date?
+                            (await (m/showDatePicker
+                                    .context ctx
+                                    .firstDate (if start-date start-date
+                                                   (DateTime.now))
+
+                                    .lastDate (.add (DateTime.now)
+                                                    (Duration .days (* 365 50)))))]
+
+                        (reset! *end-date date?)
+                        nil)))
+        (m/SizedBox .height 10)
+        (m/Text "How often"
+                .style (.-titleLarge tthm))]
+       (mapv (fn [v]
+               (m/ListTile
+                .title (m/Text v)
+                .leading (m/Radio
+                          .value v
+                          .groupValue schedule
+                          .onChanged (fn [v']
+                                       (reset! *schedule v')))))
+             ["Daily" "Weekly" "Monthly" "Yearly" "None"])))
+     .actions
+     [(m/TextButton
+       .child (m/Text "Cancel")
+       .onPressed (fn []
+                    (.pop navigator)
+                    nil))
+      (m/TextButton
+       .onPressed (fn []
+                    (await
+                     (update-reminder
+                      section-name
+                      (string/lower-case schedule)
+                      scaffold-messenger
+                      start-date
+                      end-date))
+                    (.pop navigator)
+                    nil)
+       .child (m/Text "Ok"))]))))
+
+(defn forum-explained-dialog [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Text "Welcome to the Disorganized forum!
+Here, you can share your notes, or read and comment on what others have shared.
+To post a note to the forum:
+1. Open the \"Notes\" tab and select a note.
+2. Click the three dots at the top right
+3. Select \"Share with forum\"
+
+If you want to update your post, just re-share in the same way.")
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Ok"))]))))
+
+(defn accept-publishing [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Text "WARNING: The forum is a place to discuss your notes with others.
+When you share a note with the forum, anyone in the world can read it.
+Never include personal details in notes that you share.")
+     .actions
+     [(m/TextButton
+       .onPressed #(.pop navigator)
+       .child (m/Text "Cancel"))
+      (m/TextButton
+       .child (m/Text "Accept")
+       .onPressed
+       (fn []
+         (rd/dispatch [::model/update-user-options
+                       {"has-accepted-publish-to-forum" true}])
+         (rd/dispatch [::model/fetch-user-options])
+         (.pop navigator true)))]))))
+
+(defn row-reduction-options [ctx columns section-name]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :watch [selected-rows (atom #{}) :as *selected-rows]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+
+      [(m/Text "Select columns to summarize")
+       (m/Row
+        .children
+        (mapv
+         (fn [col]
+           (m/FilterChip
+            .selected (contains? selected-rows col)
+            .label (m/Text col)
+            .onSelected
+            (fn [selected?]
+              (if selected?
+                (swap! *selected-rows #(conj % col))
+                (swap! *selected-rows #(disj % col))))))
+         columns))])
+
+     .actions
+     [(cancel)
+      (m/TextButton
+       .child (m/Text "Accept")
+       .onPressed (fn []
+                    (rd/dispatch
+                     [::model/update-current-note
+                      (fn [m]
+                        ;; (update-in m [:sections section-name "calculations"]
+                        ;;             #(assoc % column "sum"))
+                        (update-in m
+                                   [:sections section-name "row-calculations"]
+                                   #(assoc %
+                                           "selected-rows" selected-rows
+                                           "operand" "addition")))])
+                    (.pop navigator)))]))))
+
+(defn column-reduction-options [ctx column section-name]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Text (str "Calculate on " column))
+     .actions
+     [(m/TextButton.icon
+       .icon (m/Icon m/Icons.add)
+       .label (m/Text "Sum")
+       .onPressed
+       (fn []
+         (rd/dispatch [::model/update-current-note
+                       (fn [m]
+                         (update-in m [:sections section-name "calculations"]
+                                    #(assoc % column "sum")))])
+
+         (.pop navigator)))
+
+      (m/TextButton.icon
+       .icon (m/Icon m/Icons.clear)
+       .label (m/Text "Multiply")
+       .onPressed
+       (fn []
+         (rd/dispatch [::model/update-current-note
+                       (fn [m]
+                         (update-in m [:sections section-name "calculations"]
+                                    #(assoc % column "multiply")))])
+         (.pop navigator)))
+
+      (m/TextButton.icon
+       .icon (m/Icon m/Icons.minimize)
+       .onPressed
+       (fn []
+         (rd/dispatch [::model/update-current-note
+                       (fn [m]
+                         (update-in m [:sections section-name "calculations"]
+                                    #(dissoc % column)))])
+         (.pop navigator))
+
+       .label (m/Text "Nothing"))]))))
+
+(defn column-selector [columns ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (mapv (fn [c]
+              (m/TextButton
+               .onPressed
+               (fn []
+                 (.pop navigator c))
+               .child (m/Text c))) columns))))))
+
+(defn delete-ref
+  "Example: media/l32TI1R9ZCZlGuv4qkRKfp4yzx22/aab0ebdf-5da1-4158-88ab-ff67631dc36b/Screenshot From 2025-03-14 15-46-21.png"
+  [fullpath])
+
+(defn image-popup [ctx ^Reference ref]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/TextButton
+        .onPressed
+        (fn []
+          (let [ref (.-fullPath ref)
+                storage-ref (FirebaseStorage.instance.ref)]
+            (await (.delete (.child storage-ref (str "/" ref))))
+            (.pop navigator)))
+        .child (m/Text "delete"))])))))
+
+(defn web-carousel [ctx {:keys [get-path-web get-path-mobile files file-urls captions section-name]}]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :context ctx
+    (m/AlertDialog
+     .content
+     (m/SingleChildScrollView
+      .child
+      (m/Column
+       .children
+       (mapv (fn [i]
+
+               (m/Column
+                .children
+                [(m/TextButton
+                  .onPressed (fn []
+                               (image-popup ctx (:ref i)))
+                  .child
+                  (m/Image.network (:url i)
+                                   .fit m/BoxFit.contain))
+                 (f/widget
+                  :key (count (if kIsWeb file-urls files))
+                  :managed [caption-tc (m/TextEditingController)]
+                  :get {{tthm .-textTheme} m/Theme}
+                  :watch [brightness (rd/subscribe [::model/get-brightness])]
+                  :managed [focus-node (m/FocusNode)
+                            _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                                   (fn [_]
+                                     (.-text! caption-tc
+                                              (or (when captions
+                                                    (captions
+                                                     (if kIsWeb
+                                                       (when-let [ref (:ref i)]
+                                                         (get-path-web
+                                                          (.-fullPath ref)))
+                                                       (get-path-mobile
+                                                        (.-path (first files))))))
+                                                  ""))
+                                     nil))
+                                  nil) :dispose nil]
+
+                  :bg-watcher ([focused? focus-node :> .-hasFocus]
+                               (when-not focused?
+                                 (rd/dispatch [::model/update-current-note
+                                               (fn [m]
+                                                 (update-in
+                                                  m
+                                                  [:sections section-name "content" "captions"]
+                                                  (fn [captions]
+                                                    (assoc (or captions {})
+                                                           (if kIsWeb
+                                                             (get-path-web
+                                                              (.-fullPath (:ref i)))
+                                                             (get-path-mobile (.-path i)))
+                                                           (.-text caption-tc)))))])))
+
+                  (m/TextField
+                   .controller caption-tc
+                   .focusNode focus-node
+                   .decoration (m/InputDecoration
+                                .hintText "Caption "
+                                .hintStyle (.merge
+                                            (.-bodySmall tthm)
+                                            (theme/faded-text-style brightness)))))
+                 (m/SizedBox .height 10)])) file-urls)))
+     .actions
+     [(m/TextButton
+       .onPressed (fn []
+                    (.pop navigator))
+       .child (m/Text "Ok"))]))))
+
+(defn show-collaborators [text ctx]
+  (println "collaborators" text)
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get {{tthm .-textTheme} m/Theme}
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children [(m/Text "Collaborators: " .style (utils/headline tthm 5))
+                 (m/Padding  .padding (m/EdgeInsets.only .bottom 10.0))
+                 (m/SelectableText text)])
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Ok"))]))))
+
+(defn collaborate [note-id ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :watch [user-stream (.snapshots
+                         (.doc
+                          (.collection FirebaseFirestore.instance "users")
+                          (model/uid)))]
+
+    :let [friends (if-let [parsed (model/firestore-stream->map user-stream)]
+                    (or (parsed "friends") {})
+                    {})]
+
+    :get [m/ScaffoldMessenger m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (let [text "Input email"]
+                   (m/TextEditingController.fromValue
+                    (m/TextEditingValue
+                     .text text
+                     .selection (m/TextSelection
+                                 .baseOffset 0
+                                 .extentOffset (count text)))))]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      (concat
+       [(m/Text "Enter the email of a registered user.\nTo share with an iOS user, use the special email-address listed in their settings.")
+        (m/TextFormField
+         .autofocus true
+         .controller tc)
+        (m/SizedBox .height 10)]
+       (when (< 0 (count friends))
+         (concat
+          [(m/Text "Or select someone you previously shared with")]
+          (mapv (fn [[uid email]]
+                  (m/TextButton
+                   .child (m/Text email)
+                   .onPressed (fn []
+                                (let [result  (await (.shareNote (fdb/FirestoreDB) note-id uid))]
+                                  (model/snackbar scaffold-messenger result))
+                                (.pop navigator)
+                                nil)))
+                friends)))))
+     .actions
+     [(f/widget
+       :get [m/Navigator]
+       (m/TextButton
+        .onPressed #(.pop navigator)
+        .child (m/Text "Cancel")))
+      (m/TextButton
+       .child (m/Text "Accept")
+       .onPressed (fn []
+
+                    (let [email (:email (model/current-user))
+                          db (fdb/FirestoreDB)
+
+                          result (await (model/function-call "get_user_by_email"
+                                                             {"email" (.-text tc)}))
+                          other-uid (.-data result)
+                          result (when (and (not= email (.-text tc))
+                                            other-uid)
+                                   (await (.shareNote db note-id other-uid)))
+
+                          snack (fn [t] (.showSnackBar scaffold-messenger
+                                                       (m/SnackBar .content (m/Text t))))]
+                      (snack (if result result "Couldn't share with that email"))
+
+                      (when result
+                        (let [db FirebaseFirestore.instance
+                              ref (.doc
+                                   (.collection db "users")
+                                   (model/uid))]
+
+                          (.set ref {"friends" {other-uid
+                                                (.-text tc)}}
+                                (SetOptions .merge true)))))
+                    (.pop navigator)))]))))
+
+(defn generate-image-urls? [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (let [text "Input email"]
+                   (m/TextEditingController.fromValue
+                    (m/TextEditingValue
+                     .text text
+                     .selection (m/TextSelection
+                                 .baseOffset 0
+                                 .extentOffset (count text)))))]
+    (m/AlertDialog
+     .content (m/Text "Generate public urls for images? \nIf no, will not export media files.\nIf yes, you are responsible for keeping the exported URLs secret.")
+     .actions
+     [(f/widget
+       :get [m/Navigator]
+       (m/TextButton
+        .onPressed #(.pop navigator)
+        .child (m/Text "No")))
+      (m/TextButton
+       .child (m/Text "Yes")
+       .onPressed (fn []
+                    (.pop navigator true)))]))))
+
+(defn upload-to-forum [type files  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/forum/"
+                                            uid
+                                            "/"
+                                            folder-id))]
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar
+                    .content (m/Text (str "Uploading, stand by..."))))
+
+    (doseq [file files
+            :let [ref (.child folder-ref
+                              (str "/" (if (= "images" type)
+                                         (.-name file)
+                                         (basename (.-path file)))))]]
+      (if kIsWeb
+        (await (.putData ref (await (.readAsBytes file))))
+        (await (.putFile ref (File (.-path file))))))))
+
+(defn update-forum-metadata
+  ([note-id timestamp] (update-forum-metadata note-id timestamp nil nil nil))
+  ([note-id timestamp title owner plaintext]
+   (let [tags []]
+     (.set (-> FirebaseFirestore.instance
+               (.collection "forum-metadata")
+               (.doc note-id))
+
+           (if (and title owner)
+             (dutils/stringKeys
+              {"last-updated" timestamp
+               "tags" tags
+               "title" title
+               "owner" owner})
+             (dutils/stringKeys
+              {"last-updated" timestamp}))
+           (SetOptions .merge true)))))
+
+(defn share-forum [note  ^m/ScaffoldMessengerState scaffold-messenger prefs ctx]
+  (when (await (accept-publishing ctx))
+    (if (string/blank? (:plaintext note))
+      (.showSnackBar scaffold-messenger
+                     (m/SnackBar
+                      .content (m/Text "Forum notes must contain text in the topmost field.")))
+      (let [media-sections (filter (fn [[section-name section]]
+                                     (= (section "type") "media"))
+                                   (:sections note))]
+
+        (await (Future.wait (mapv (fn [[section-name section]]
+                                    (let [folder-id (get-in section ["content" "id"])]
+                                      (dutils/copyFolderInFirebaseStorage
+                                       .sourceFolderPath
+                                       (str "/media/"
+                                            (model/uid)
+                                            "/"
+                                            folder-id)
+
+                                       .destinationFolderPath
+                                       (str "/forum/"
+                                            (model/uid)
+                                            "/"
+                                            folder-id))))
+                                  media-sections)))
+
+        (.set (.doc (.collection FirebaseFirestore.instance "forum")
+                    (:id note))
+              (w/stringify-keys
+               (-> note
+                   (dissoc :user_emails)
+                   (assoc :shared-to-forum-timestamp (FieldValue.serverTimestamp)))))
+        (update-forum-metadata
+         (:id note)
+         (FieldValue.serverTimestamp)
+         (first (string/split (:plaintext note) "\n"))
+         (:owner note)
+         (:plaintext note))
+        (.showSnackBar scaffold-messenger
+                       (m/SnackBar
+                        .content (m/Text "Open the forum tab to view your post!")))))))
+
+(defn share-external [note timeformat-24-hours? ctx]
+  (let [has-media-section? (some (fn [[_ section]]
+                                   (= "media" (section "type"))) (:sections note))
+        gen-img? (if has-media-section? (await (generate-image-urls? ctx)) false)
+        export (await (pp/note-to-string-with-title note timeformat-24-hours? gen-img?))
+        title (str (:title export) ".md")]
+
+    (try (await (SharePlus.instance.share
+                 (ShareParams
+                  .files [(XFile.fromData
+                           (c/utf8.encode (:body export))
+                           .mimeType "text/plain")]
+                  .fileNameOverrides [title])))
+
+         (catch Exception e
+           (await (SharePlus.instance.share
+                   (ShareParams
+                    .files [(XFile.fromData
+                             (c/utf8.encode (:body export))
+                             .mimeType "text/plain")]
+                    .fileNameOverrides [(str (:id note) ".md")])))))))
+
+(defn encrypt-note [ctx password]
+  (if password
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (assoc m :encrypted true))])
+
+    (m/showDialog
+     .context ctx
+     .builder
+     (f/build
+      :get [m/Navigator m/ScaffoldMessenger]
+      :get {{tthm .-textTheme} m/Theme}
+      :managed [tc (m/TextEditingController)]
+      (m/AlertDialog
+       .content
+       (m/Column
+        .mainAxisSize m/MainAxisSize.min
+        .children
+        [(m/Text "Create encryption password"
+                 .style (.-titleLarge tthm))
+         (m/SizedBox .height 12)
+         (m/Text "This is an advanced feature - READ CAREFULLY"
+                 .style (.-titleMedium tthm))
+         (m/SizedBox .height 12)
+         (m/Text "- You are responsible for remembering the password. 
+- The title and tags will not be encrypted
+- If you lose the password WE CAN NOT HELP YOU.
+- Use the same password for all encrypted notes.
+- Most features are disabled for encrypted notes.
+- Only lists and text will be encrypted, OTHER SECTIONS WILL BE DELETED"
+                 .style (.-bodyLarge tthm))
+
+         (m/TextField
+          .obscureText true
+          .controller tc)])
+
+       .actions [(m/TextButton
+                  .onPressed #(.pop navigator)
+                  .child (m/Text "Cancel"))
+
+                 (m/TextButton
+                  .onPressed (fn []
+                               (if (< 6 (count (.-text tc)))
+                                 (do
+                                   (rd/dispatch [::model/set-key :password (.-text tc)])
+                                   (rd/dispatch [::model/update-current-note
+                                                 (fn [m]
+                                                   (assoc m :encrypted true))])
+
+                                   (.pop navigator))
+
+                                 (model/snackbar scaffold-messenger "Password too short!")))
+                  .child (m/Text "Ok"))])))))
+
+(defn properties-menu [& [id?]]
+  (f/widget
+   :context ctx
+   :watch  [note (rd/subscribe [::model/current-note])
+            premium? (rd/subscribe [::model/premium?])
+            password (rd/subscribe [::model/password])]
+   :get [m/Navigator :timeformat-24-hours? m/ScaffoldMessenger]
+   :padding {:right 8}
+   :let [id (or id? (:id note))
+         pinned? (:pin note)]
+   :get {{cs .-colorScheme} m/Theme}
+
+   :watch [prefs (rd/subscribe [::model/get-user-options])
+           reorder-sections (rd/subscribe [::model/reorder-sections?])]
+   (m/PopupMenuButton
+    .clipBehavior m/Clip.antiAlias
+    .tooltip "Note properties"
+    .itemBuilder (fn [_]
+                   #dart ^m/PopupMenuEntry
+                    [ ;; (m/PopupMenuItem
+                    ;;  .value "undo"
+                    ;;  .child (m/ListTile
+                    ;;          .title (m/Text "Undo")
+                    ;;          .leading (m/Icon m/Icons.undo)))
+                     (m/PopupMenuItem
+                      .value "undo"
+                      .child (m/ListTile
+                              .title (m/Text "Undo")
+                              .leading (m/Icon m/Icons.undo)))
+                     (m/PopupMenuItem
+                      .value "redo"
+                      .child (m/ListTile
+                              .title (m/Text "Redo")
+                              .leading (m/Icon m/Icons.redo)))
+
+                     (m/PopupMenuItem
+                      .value "pin"
+                      .child (m/ListTile
+                              .title (m/Text (if pinned? "Unpin" "Pin to top"))
+                              .leading (m/Icon
+                                        (if pinned?
+                                          m/Icons.push_pin
+                                          m/Icons.push_pin_outlined))))
+
+                     (m/PopupMenuItem
+                      .value "encrypt"
+                      .child (m/ListTile
+                              .title (if premium?
+                                       (m/Text "Encrypt note")
+                                       (m/Text "Encrypt note (premium only)"))
+                              .leading (m/Icon
+                                        m/Icons.enhanced_encryption)))
+
+                     (m/PopupMenuItem
+                      .value "reorder"
+                      .child (m/ListTile
+                              .title (m/Text (if reorder-sections
+                                               "Finish reordering sections"
+                                               "Reorder sections"))
+                              .leading (m/Icon m/Icons.swap_vert)))
+
+                     (m/PopupMenuItem
+                      .value "share"
+                      .child (m/ListTile
+                              .title (m/Text "Export note")
+                              .leading (m/Icon m/Icons.output)))
+
+                     (m/PopupMenuItem
+                      .value "collaborate"
+                      .child (m/ListTile
+                              .title (m/Text (if premium?
+                                               "Share"
+                                               "Share (premium only)"))
+                              .leading (m/Icon m/Icons.share)))
+
+                     (m/PopupMenuItem
+                      .value "delete"
+                      .child (m/ListTile
+                              .title (m/Text "Delete note")
+                              .leading (m/Icon m/Icons.delete)))
+                    ;; (m/PopupMenuItem
+                    ;;  .value "Create widget"
+                    ;;  .child (m/Text "Create widget"))
+                     ])
+    .onSelected (fn [selection]
+
+                  (model/unfocus-then-run
+                   (await (case selection
+                            "pin" (rd/dispatch [::model/update-current-note
+                                                (fn [m] (if (:pin m)
+                                                          (dissoc m :pin)
+                                                          (assoc m :pin (.now DateTime))))])
+                            "undo" (rd/dispatch [::model/undo])
+
+                            "encrypt" (cond
+                                        (:encrypted note) (model/snackbar scaffold-messenger  "This note is already encrypted.")
+                                        (or premium? kDebugMode) (encrypt-note ctx password)
+                                        :else (model/paywall scaffold-messenger))
+
+                            "redo" (rd/dispatch [::model/redo])
+
+                            "reorder" (do
+                                        (model/log-crashlytics "toggle reorder sections")
+                                        (rd/dispatch [::model/set-key :reorder-sections? (not reorder-sections)]))
+                            "collaborate" (if premium?
+                                            (collaborate id ctx)
+                                            (model/paywall scaffold-messenger))
+                            "share" (share-external note timeformat-24-hours?  ctx)
+                            "delete" (confirm
+                                      ctx
+                                      "Really delete note?"
+                                      (fn []
+                                        (.removeCurrentSnackBar scaffold-messenger)
+
+                                        (Future/delayed
+                                         (Duration .milliseconds 100)
+                                         (fn []
+                                           (when (not kIsWeb)
+                                             (doseq [[section-id section] (:sections note)
+                                                     :when (or (= "alarm" (section "type"))
+                                                               (= "timer" (section "type")))]
+                                               (await (Alarm.stop
+                                                       (.hashCode section-id)))))
+                                           (rd/dispatch [::model/set-current-note-id nil])
+                                           (rd/dispatch [::model/reset-restructure-mode])
+                                           (rd/dispatch [::model/reset-undo-stack])
+                                           (let [uid (:user-id (model/current-user))
+                                                 db (fdb/FirestoreDB)]
+                                             (try
+                                               (await (.deleteNote db
+                                                                   id
+                                                                   uid))
+                                               (.pop navigator)
+                                               (model/exit-edit-note scaffold-messenger nil)
+                                               (catch dynamic e
+                                                 (println "error! " e))))
+
+                                           (rd/dispatch
+                                            [::model/refresh-notes]))))))))
+
+                  nil))))

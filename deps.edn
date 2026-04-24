@@ -1,0 +1,30 @@
+{:paths ["src" "resources"]
+ :mvn/repos {"ossrh-snapshots" {:url "https://s01.oss.sonatype.org/content/repositories/snapshots"}}
+
+ :deps {org.clojure/clojure {:mvn/version "1.11.1"}
+        net.clojars.htihospitality/re-dash {:mvn/version "1.2.1"}
+        tensegritics/clojuredart
+        {:git/url "https://github.com/tensegritics/ClojureDart.git"
+         :sha "9385be3c88ab6593350fdda50d86af985224971b" #_"3d132b2b147b8e9a5e77068af69d39f27f2414a6" #_"6127d8ef23156f2be5b10e97a0932868d175e585" #_"0e1ef256cf3a0ee9b71db6d4af3d8be581b95195" #_"98463fae4e5fe50566b38e688cfed78071ea91a1" #_"91e1074bd2e912c95bbb692120ccf44b8d08aa4a" #_"75665e2018b5c373b2e90d2299579fec7f94b3db" #_"84df2e8d0062027fc1ceb96747ecbcd80a216a2b"}}
+
+ :cljd/opts {:kind :flutter
+             :main disorganized.main}
+
+ :aliases
+ {:run-m {:main-opts ["-M" "disorganized.disorganized"]}
+
+  :cljd {:main-opts ["-m" "cljd.build"]}
+
+  :dev {:extra-paths ["dev"]
+        :jvm-opts ["--add-opens=java.base/java.nio=ALL-UNNAMED"
+                   "-Dio.netty.tryReflectionSetAccessible=true"]}
+
+  :run-x {:ns-default disorganized.disorganized
+          :exec-fn greet
+          :exec-args {:name "Clojure"}}
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.9.4"}}
+          :ns-default build}
+  :test {:extra-paths ["test"]
+         :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}
+                      io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}}}}

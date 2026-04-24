@@ -1,0 +1,362 @@
+(ns disorganized.ui.media
+  (:require
+      ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage]]
+
+   ["package:http/http.dart" :as http]
+   ["package:mime/mime.dart" :refer [lookupMimeType]]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:flutter/services.dart" :as svc]
+   ["dart:io" :refer [File Directory]]
+   ["package:image_picker/image_picker.dart" :refer [ImagePicker ImageSource]]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.string :as string]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:file_picker/file_picker.dart" :refer [FilePicker]]
+   ["package:path/path.dart" :refer [basename]]
+   ["package:flutter/material.dart" :as m]
+   [cljd.flutter :as f]))
+
+(defn get-path-mobile
+  [s]
+  (second
+   (string/split
+    s
+    #"/media/")))
+
+(defn get-path-web
+  [s]
+  (second
+   (string/split
+    s
+    #"media/")))
+
+(defn upload-web "For uploading other file type on web"
+  [section-name type bytes name folder-id]
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media/"
+                                            uid
+                                            "/"
+                                            folder-id))
+        ref (.child folder-ref
+                    (str "/" name))]
+
+    (await (.putData ref (await bytes)))
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (assoc-in m [:sections section-name "content"]
+                              {"id" folder-id
+                               "type" type}))])))
+
+(defn upload [section-name type files  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (println "uploading " folder-id)
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media/"
+                                            uid
+                                            "/"
+                                            folder-id))]
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar
+                    .content (m/Text (str "Uploading, stand by..."))))
+
+    (doseq [file files
+            :let [ref (.child folder-ref
+                              (str "/" (if (= "images" type)
+                                         (.-name file)
+                                         (basename (.-path file)))))]]
+      (if kIsWeb
+        (await (.putData ref (await (.readAsBytes file))))
+        (await (.putFile ref (File (.-path file))))))
+    ;;After we've uploaded it, place the file in the app directory straight away
+
+    (rd/dispatch [::model/rebuild-folder-id [folder-id true]])
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (assoc-in m [:sections section-name "content"]
+                              {"id" folder-id
+                               "type" type}))])))
+
+(defn pick-images [section-name  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (let [picker (ImagePicker)
+        images (await (.pickMultiImage picker))]
+    (when (seq images)
+      (await (upload section-name "images" images scaffold-messenger folder-id)))))
+
+(defn take-image [section-name  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (let [picker (ImagePicker)
+        image (await (.pickImage picker
+                                 .source ImageSource.camera))]
+    (when image (await (upload section-name "camera" [image] scaffold-messenger folder-id)))))
+
+(defn download-files-web [folder-id]
+  (let [storage-ref (FirebaseStorage.instance.ref)
+        images-ref (await
+                    (.listAll
+                     (.child storage-ref
+                             (str "/media/"
+                                  (:user-id (model/current-user))
+                                  "/"
+                                  folder-id))))
+        data (atom [])]
+
+    (doseq [item (.-items images-ref)
+            :let [url (await (.getDownloadURL item))]]
+      (swap! data #(conj % {:url url
+                            :ref item})))
+    @data))
+
+(defn show-images [section-name folder-id captions]
+  (f/widget
+   :context ctx
+   :get [m/Navigator]
+   :let [*note (atom nil)]
+
+   :watch [file-urls  (download-files-web folder-id) :default []]
+
+   :let [misc {:get-path-web get-path-web
+               :get-path-mobile get-path-mobile
+               :file-urls file-urls
+               :captions captions
+               :section-name section-name}]
+
+
+   :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                (fn [_]
+                  (rd/dispatch [::model/update-current-note
+                                (fn [m]
+                                  (reset! *note m)
+                                  m)])
+                  nil)) :dispose nil]
+
+   :key (count file-urls)
+   (m/Column
+    .children
+    (concat [(m/TextButton
+              .onPressed (fn []
+                           (popup/web-carousel ctx misc)
+                           nil)
+              .child
+
+              (if (>= 6 (count file-urls))
+                (m/GridView.count
+                 .shrinkWrap true
+                 .crossAxisSpacing 1
+                 .mainAxisSpacing 1
+                 .physics (m/NeverScrollableScrollPhysics)
+                 .crossAxisCount 2
+                 .children
+                 (mapv (fn [f]
+                         (CachedNetworkImage
+                          .imageUrl (:url f)
+                                          .height 600
+                                          .width 500
+                                          .fit (m/BoxFit.contain)))
+                       file-urls))
+
+                (m/ConstrainedBox
+                 .constraints (m/BoxConstraints .maxWidth 600
+                                                .maxHeight 800)
+                 .child (m/Stack
+                         .children
+                         (map-indexed (fn [i f]
+                                        (f/widget
+                                         (m/Positioned
+                                          .top (* i 3)
+                                          .left (* i 3))
+                                         (m/ClipRRect
+                                          .borderRadius (m/BorderRadius.circular 15.0))
+                                         (m/ConstrainedBox
+                                          .constraints (m/BoxConstraints .maxWidth 300
+                                                                         .maxHeight 400))
+                                         (m/Image.network (:url f)
+                                                          .fit (m/BoxFit.contain))))
+                                      file-urls)))))]
+
+            (when (= 1 (count file-urls))
+              [(f/widget
+                :key (count file-urls)
+                :managed [caption-tc (m/TextEditingController)]
+                :get {{tthm .-textTheme} m/Theme}
+                :watch [brightness (rd/subscribe [::model/get-brightness])]
+                :managed [focus-node (m/FocusNode)
+                          _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                                 (fn [_]
+                                   (.-text! caption-tc
+                                            (str (when captions
+                                                   (captions
+                                                    (when-let
+                                                     [^Reference ref
+                                                      (:ref (first file-urls))]
+                                                      (get-path-web
+                                                       (.-fullPath ref)))))))
+                                   nil))
+                                nil) :dispose nil]
+
+                :bg-watcher ([focused? focus-node :> .-hasFocus]
+                             (when-not focused?
+                               (rd/dispatch [::model/update-current-note
+                                             (fn [m]
+                                               (update-in
+                                                m
+                                                [:sections section-name "content" "captions"]
+                                                (fn [captions]
+                                                  (assoc (or captions {})
+                                                         (get-path-web
+                                                          (.-fullPath (:ref (first file-urls))))
+                                                         (.-text caption-tc)))))])))
+
+                (m/TextField
+                 .controller caption-tc
+                 .focusNode focus-node
+                 .decoration (m/InputDecoration
+                              .hintText "Caption "
+                              .hintStyle (.merge
+                                          (.-bodySmall tthm)
+                                          (theme/faded-text-style brightness)))))])))))
+
+(defn pick-files [section-name  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (when-let [result (await (FilePicker.platform.pickFiles
+                            .allowMultiple false))]
+    (if kIsWeb
+      (let [bytes (-> result .-files .-first .-bytes)
+            name (-> result .-files .-first .-name)]
+
+        (if (> 500000000 (count bytes))
+          (await (upload-web section-name "other" bytes name folder-id))
+          (.showSnackBar scaffold-messenger
+                         (m/SnackBar .content
+                                     (m/Text "All files must be below 50 MB")))))
+
+      (let [sizes (await (Future.wait (into [] (.map (.paths result) (fn [p]  (.length (File p)))))))]
+        (println "sizes " sizes)
+        (if (every? #(> 500000000 %) sizes)
+          (await (upload section-name "other" (into [] (.map (.paths result)
+                                                             (fn [p] (File p))))
+                         scaffold-messenger
+                         folder-id))
+          (.showSnackBar scaffold-messenger
+                         (m/SnackBar .content
+                                     (m/Text "All files must be below 50 MB"))))))))
+
+(defn- pick-image-button [tthm section-name  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (m/ElevatedButton.icon
+   .onPressed (fn []
+                (await (pick-images section-name scaffold-messenger folder-id)))
+   .label (m/Text "Images")
+   .icon (m/Icon m/Icons.image)))
+
+(defn- take-image-button [tthm section-name  ^m/ScaffoldMessengerState scaffold-messenger folder-id]
+  (m/ElevatedButton.icon
+   .onPressed (fn []
+                (await (take-image section-name scaffold-messenger folder-id)))
+   .label (m/Text "Camera")
+   .icon (m/Icon m/Icons.camera)))
+
+(defn- pick-other-button [tthm section-name folder-id]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   (m/ElevatedButton.icon
+    .onPressed (fn []
+                 (await (pick-files section-name scaffold-messenger folder-id)))
+    .label (m/Text "Other")
+    .icon (m/Icon m/Icons.attach_file))))
+
+(defn show-other [section-name folder-id]
+  (f/widget
+   :context ctx
+   :watch [files (rd/subscribe [::model/files-on-disk-sub folder-id])
+           file-urls (download-files-web folder-id) :default []]
+   :let [files file-urls]
+
+
+   (m/ListView
+    .shrinkWrap true
+    .physics (m/NeverScrollableScrollPhysics)
+    .children
+    (for [f files
+          :let [name (str ((clojure.string/split (:url f) #"/|\?|%2F") 10))]]
+      (f/widget
+       :key (str f)
+                                        ; :watch [preview (FilePreview.getThumbnail (.-path f)) :default  (m/Text "")]
+       (m/ListTile
+        .dense true
+                                        ; .leading preview
+        .title (m/Text name)
+        .onTap (fn []
+                 
+                 (let [response (await (http/get (Uri.parse (:url f))))
+                       
+                       bytes (.-bodyBytes response)
+                       xfile (XFile.fromData
+                              bytes
+                              .name name)
+
+                       params (ShareParams
+                               .files [xfile]
+                               .fileNameOverrides [name])]
+
+                   (await (SharePlus.instance.share params))
+                   nil)
+                 nil)
+        .onLongPress (fn []
+                       (popup/confirm ctx "Delete?"
+                                      (fn []
+                                        (let [storage-ref (FirebaseStorage.instance.ref)
+                                              ;;This dance gets rid of the local path
+                                              ;;path starting from /media is mirrored on the cloud
+                                              path (str "/media"
+                                                        (string/join "/" (rest (clojure.string/split (.-path f)
+                                                                                                     #"/media"))))]
+                                          (await (.delete (.child storage-ref path)))
+                                          (await (.delete f))
+                                          (rd/dispatch
+                                           [::model/delete-file-from-folder-id
+                                            [folder-id f]])))))))))))
+
+(defn show [section-name]
+  (f/widget
+   :key (str section-name "-media")
+   :watch [{{:strs [content]} section-name} (rd/subscribe [::model/current-sections])]
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/ScaffoldMessenger]
+   (m/Column
+    .children (case (content "type")
+                "images"  [(show-images section-name
+                                        (content "id")
+                                        (content "captions"))
+
+                           (pick-image-button
+                            tthm
+                            section-name
+                            scaffold-messenger
+                            (content "id"))]
+                "camera" [(show-images section-name
+                                       (content "id")
+                                       (content "captions"))
+                          (take-image-button tthm section-name scaffold-messenger
+                                             (content "id"))]
+
+                "other" [(show-other section-name (content "id"))
+                         (pick-other-button tthm section-name (content "id"))]
+
+                nil [(m/OverflowBar
+                      .children
+                      [(pick-image-button tthm section-name scaffold-messenger
+                                          (str (random-uuid)))
+                       (m/SizedBox .width 5)
+                       (take-image-button tthm section-name scaffold-messenger
+                                          (str (random-uuid)))
+                       (m/SizedBox .width 5)
+                       (pick-other-button tthm section-name
+                                          (str (random-uuid)))])]))))

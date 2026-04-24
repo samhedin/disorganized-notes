@@ -1,0 +1,122 @@
+(ns disorganized.ui.image-carousel
+  (:require  ["package:flutter/material.dart" :as m]
+             
+             ["package:share_plus/share_plus.dart" :refer [XFile Share]]
+             [cljd.flutter :as f]
+             [hti.re-dash.alpha :as rd]
+             ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+             ["package:go_router/go_router.dart" :as go_router]
+             ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+             [disorganized.ui.theme :as theme]
+             [disorganized.model :as model]
+             [clojure.string :refer [split]]
+             [disorganized.ui.popup :as popup]
+             ["dart:io" :refer [File Directory]]
+             [clojure.string :as string]))
+
+(defn image-popup [ctx ^File image *i folder-id]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+
+      .children (concat
+                 (if kIsWeb
+                   [(m/Text "<downloads only supported on Android/iOS right now>")]
+                   [(m/TextButton
+                     .onPressed
+                     (fn []
+                       (let [xfile (XFile (.-path image))]
+                         (await (Share.shareXFiles [xfile] .text "Your image"))
+                         (.pop navigator)
+                         nil))
+                     .child (m/Text "Share"))])
+                 [(m/TextButton
+                   .onPressed (fn []
+                                (let [storage-ref (FirebaseStorage.instance.ref)
+
+                                      ;;This dance gets rid of the local path
+                                      ;;path starting from /media is mirrored on the cloud
+                                      path (str "/media"
+                                                (string/join "/" (rest (split (.-path image)
+                                                                              #"/media"))))
+                                      out [folder-id image]]
+                                  (await (.delete (.child storage-ref path)))
+                                  (await (.delete image))
+                                  (rd/dispatch [::model/delete-file-from-folder-id out])
+                                  (swap! *i #(keep (fn [i]
+                                                     (when (not= i image)
+                                                       i)) %))
+                                  (.pop navigator)
+                                  ;;If no images left, exit image view.
+                                  (when (empty? @*i)
+                                    (.pop navigator))))
+                   .child (m/Text "Delete"))]))
+     .actions [(popup/cancel)]))))
+
+(defn carousel [image-files note folder-id {:keys [get-path-web get-path-mobile files file-urls captions section-name]}]
+  (f/widget
+   :context ctx
+   (m/Scaffold
+    .appBar (m/AppBar)
+    .body
+    (m/SafeArea
+     .child
+     (f/widget
+      :context ctx
+      :watch [image-files (atom image-files) :as *i]
+      (m/ListView
+       .children (mapv (fn [^File image]
+                         (m/Column
+                          .children
+                          [(m/TextButton
+                            .onPressed (fn []
+                                         (image-popup ctx image *i folder-id))
+                            .child (m/FittedBox
+                                    .fit m/BoxFit.fill
+                                    .child (m/Image.file image)))
+                           (f/widget
+                            :key (count files)
+                            :managed [caption-tc (m/TextEditingController)]
+                            :get {{tthm .-textTheme} m/Theme}
+                            :watch [brightness (rd/subscribe [::model/get-brightness])]
+                            :padding {:bottom 20}
+                            :managed [focus-node (m/FocusNode)
+                                      _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                                             (fn [_]
+                                               (.-text! caption-tc
+                                                        (or (when captions
+                                                              (captions
+                                                               (get-path-mobile
+                                                                (.-path image))))
+                                                            ""))
+                                               nil))
+                                            nil) :dispose nil]
+
+                            :bg-watcher ([focused? focus-node :> .-hasFocus]
+                                         (when-not focused?
+                                           (rd/dispatch [::model/update-current-note
+                                                         (fn [m]
+                                                           (update-in
+                                                            m
+                                                            [:sections section-name "content" "captions"]
+                                                            (fn [captions]
+                                                              (assoc (or captions {})
+                                                                     (get-path-mobile (.-path image))
+                                                                     (.-text caption-tc)))))])))
+
+                            (m/TextField
+                             .controller caption-tc
+                             .focusNode focus-node
+                             .decoration (m/InputDecoration
+                                          .hintText "Caption "
+                                          .hintStyle (.merge
+                                                      (.-bodySmall tthm)
+                                                      (theme/faded-text-style brightness)))))]))
+                       (reverse image-files))))))))
+

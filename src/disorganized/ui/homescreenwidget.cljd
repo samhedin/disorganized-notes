@@ -1,0 +1,16 @@
+(ns disorganized.ui.homescreenwidget
+  (:require ["package:flutter/material.dart" :as m]
+            ["package:home_widget/home_widget.dart" :as hw]
+            ["package:shared_preferences/shared_preferences.dart" :as sp]
+            [cljd.flutter :as f]
+            [clojure.string :as string]
+            ["package:flutter/widgets.dart" :as widgets]))
+
+^{:annotations [^:unique (pragma "vm:entry-point")]}
+(defn interactive-callback [uri]
+  (await (hw/HomeWidget.saveWidgetData "counter" (rand-int 1000)))
+  (await (hw/HomeWidget.updateWidget
+          .androidName "InteractiveCounterWidgetReceiver")))
+
+
+

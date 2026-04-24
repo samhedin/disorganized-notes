@@ -1,0 +1,2152 @@
+(ns disorganized.model
+  (:require
+   ["package:cryptography_flutter_plus/cryptography_flutter_plus.dart" :as crf :refer [FlutterAesGcm FlutterCryptography FlutterPbkdf2]]
+   ["package:zo_animated_border/zo_animated_border.dart" :refer [ZoAnimatedGradientBorder]]
+   ["package:any_link_preview/any_link_preview.dart" :refer [AnyLinkPreview]]
+   ["package:cryptography_plus/cryptography_plus.dart" :as cr]
+   ["package:cryptography_plus/helpers.dart" :refer [randomBytes]]
+   ["package:alarm/alarm.dart" :refer [Alarm]]
+   ["package:firebase_remote_config/firebase_remote_config.dart" :as frc]
+   ["package:flutter_timezone/flutter_timezone.dart" :refer [FlutterTimezone]]
+   ["package:alarm/alarm.dart" :as alarm]
+   ["package:awesome_notifications/awesome_notifications.dart" :as notif]
+   ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+   ["package:disorganized_notes/timezone_initializer.dart" :as tz]
+   ["package:firebase_core/firebase_core.dart" :as firebase]
+   ["dart:io" :refer [File Directory]]
+   ["package:awesome_notifications_fcm/awesome_notifications_fcm.dart" :refer [AwesomeNotificationsFcm]]
+   ["package:timezone/timezone.dart" :as tzd]
+   ["package:path_provider/path_provider.dart" :refer [getApplicationDocumentsDirectory]]
+   ["package:eraser/eraser.dart" :refer [Eraser]]
+   ["package:disorganized_notes/firebase_options.dart" :as options]
+   ["package:disorganized_notes/secrets.dart" :as secrets]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference DownloadTask]]
+   ["package:purchases_flutter/purchases_flutter.dart" :as rc]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["package:flutter/material.dart" :as m]
+   ["package:shared_preferences/shared_preferences.dart" :as sp]
+   ["package:cloud_functions/cloud_functions.dart" :refer [FirebaseFunctions]]
+   [cljd.reader :refer [read-string]]
+   ["dart:io" :refer [Platform]]
+   ["dart:convert" :as c]
+   ["package:go_router/go_router.dart" :as go_router :refer [GoRouter GoRoute GoRouterState GoRouterHelper]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kProfileMode kDebugMode]]
+   ["package:purchases_ui_flutter/purchases_ui_flutter.dart" :as rcu]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   [clojure.string :as string]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   ["package:intl/intl.dart" :as intl]
+   [disorganized.ui.theme :as theme]
+   ["package:firebase_analytics/firebase_analytics.dart" :as fa]
+   ["package:home_widget/home_widget.dart" :as hw]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   [clojure.walk :as w]
+   [hti.re-dash.alpha :as rd]
+   ["package:firebase_auth/firebase_auth.dart" :refer [FirebaseAuth]]
+   ["package:disorganized_notes/firestore_db.dart" :as fdb]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:intl/intl.dart" :refer [NumberFormat]]
+   [disorganized.sali :as sali]
+   [disorganized.schema :as schema]
+   ["package:fluttertoast/fluttertoast.dart" :as t]
+   [cljd.flutter :as f]))
+
+
+(defn showtoast [msg]
+  (t/Fluttertoast.showToast
+   .msg msg
+   .toastLength t/Toast.LENGTH_LONG
+   .gravity t/ToastGravity.CENTER
+   .backgroundColor m/Colors.red
+   .textColor m/Colors.white
+   .timeInSecForIosWeb 5))
+
+(defn valid-note? [note]
+  (let [result (sali/validate schema/note note)]
+    (when (not= true result)
+      (println (:id note) ": " result))
+    (if (= true result)
+      true
+      (do (showtoast "Note corrupted, reverting change...")
+          result))))
+
+(defn validate-all-notes [notes]
+  (println (mapv #(sali/validate schema/note %) notes)))
+
+(def gemini-model "gemini-3.1-flash-lite-preview")
+
+(defn days-until
+  "How many days until (model/next-weekday DateTime.sunday)?"
+  [day]
+  (let [today (.-weekday (DateTime.now))]
+    (.-inDays (Duration
+               .days (mod (- day today)
+                          (.-daysPerWeek DateTime))))))
+
+(defn encrypt-string [aes-gcm text secret-key]
+  (let [box (await (.encryptString aes-gcm text .secretKey secret-key))
+        combined (.concatenation box .nonce true .mac true)]
+    (c/base64Encode combined)))
+
+(defn decrypt-string [aes-gcm text secret-key]
+  (println "decrypting.. ")
+  (let [bytes (c/base64Decode text)
+          box (cr/SecretBox.fromConcatenation bytes .nonceLength 12 .macLength 16)]
+      (await (.decryptString aes-gcm box .secretKey secret-key))))
+
+(defn encrypt-list-item [item aes-gcm secret-key]
+
+  (let [data (await (encrypt-string aes-gcm (item "data") secret-key))
+        children (await
+                  (Future.wait
+                   (mapv (fn [child]
+                           (encrypt-list-item child aes-gcm secret-key))
+                         (item "children"))))]
+    (assoc item "data" data "children" children)))
+
+(defn decrypt-list-item [item aes-gcm secret-key]
+
+  (let [data (await (decrypt-string aes-gcm (item "data") secret-key))
+        children (await
+                  (Future.wait
+                   (mapv (fn [child]
+                           (decrypt-list-item child aes-gcm secret-key))
+                         (item "children"))))]
+    (assoc item "data" data "children" children)))
+
+(defn encrypt-section [[section-id section] aes-gcm secret-key]
+  (await
+   (case (section "type")
+     "text" (let [text (section "content")
+                  name (await (encrypt-string aes-gcm (section "name") secret-key))
+                  encrypted-text (await (encrypt-string aes-gcm text secret-key))]
+              [section-id (assoc section "content" encrypted-text "name" name)])
+
+     "list" (let [encrypted-items (await (Future.wait
+                                          (mapv (fn [item]
+                                                  (encrypt-list-item item aes-gcm secret-key))
+                                                (section "content"))))
+                  name (await (encrypt-string aes-gcm (section "name") secret-key))]
+              [section-id (assoc section "content" encrypted-items "name" name)]))))
+
+(defn decrypt-section [[section-id section] aes-gcm secret-key]
+  (case (section "type")
+    "text" (let [text (section "content")
+                 decrypted-text (await (decrypt-string aes-gcm text secret-key))]
+             [section-id (assoc section "content" decrypted-text)])
+
+    "list" (let [content (await (Future.wait (mapv (fn [i]
+                                                     (decrypt-list-item i aes-gcm secret-key))
+                                                   (section "content"))))]
+
+             [section-id (assoc section "content" content)])))
+
+(defn decrypt-note [note password]
+
+  (let [aes-gcm (FlutterAesGcm.with256bits)
+        pbkdf2-alg (cr/Pbkdf2
+                    .macAlgorithm  (cr/Hmac.sha256)
+                    .iterations 100000
+                    .bits 256)
+
+        key (await (.deriveKeyFromPassword
+                    pbkdf2-alg
+                    .password password
+                    .nonce (note :salt)))
+
+        plaintext (await (decrypt-string aes-gcm (:plaintext note) key))
+
+        sections (await (Future.wait (mapv (fn [section]
+                                             (decrypt-section section aes-gcm key))
+                                           (:sections note))))]
+
+    (assoc note
+           :plaintext plaintext
+           :sections (into {} sections))))
+
+(defn encrypt-and-upload-note [note password]
+  (let [note (update note :salt #(or % (randomBytes 16)))
+        aes-gcm (FlutterAesGcm.with256bits)
+
+        pbkdf2-alg (cr/Pbkdf2
+                    .macAlgorithm  (cr/Hmac.sha256)
+                    .iterations 100000
+                    .bits 256)
+
+        secret-key (await (.deriveKeyFromPassword
+                           pbkdf2-alg
+                           .password password
+                           .nonce (note :salt)))
+
+        pt (await (encrypt-string aes-gcm (:plaintext note) secret-key))
+
+        allowed-sections #{"table2" "text" "list"}
+
+        fsections (filter (fn [[_ section]]
+                            (allowed-sections (section "type"))) (:sections note))
+
+        encrypted-sections (await
+                            (Future.wait
+                             (mapv (fn [section]
+
+                                     (encrypt-section section aes-gcm secret-key)) fsections)))
+
+        encrypted-note (assoc note
+                              :plaintext pt
+                              :sections (into {} encrypted-sections))
+
+        ;decrypted-note (await (decrypt-note encrypted-note password))
+        ]
+
+    (.set (.doc (.collection FirebaseFirestore.instance "notes2")
+                (:id encrypted-note))
+          (w/stringify-keys
+           (assoc encrypted-note :updated_at (FieldValue.serverTimestamp))))))
+
+(def black-color-seed (m/Color 0x00001d))
+(def white-color-seed (m/Color 0xffffff))
+
+(defn unfocus []
+  (.unfocus (.-primaryFocus (.instance m/FocusManager))))
+
+(defn exit-edit-note
+  "Don't call this during clone operations since it unsets current-note-local on a delay."
+  [scaffold-messenger old-note?]
+  (unfocus-then-run
+   (rd/dispatch [::set-key :ai-generating-section false])
+   (rd/dispatch [::reset-restructure-mode])
+   (rd/dispatch [::reset-undo-stack])
+   (rd/dispatch [::delete-if-not-edited])
+   (rd/dispatch [::replace-current-note-in-notes])
+
+   (when old-note?
+     (rd/dispatch [::set-current-note-local old-note?]))))
+
+(defn import-note "Should only be used for importing notes, see the :imported key"
+  [note]
+  (let [fdb (fdb/FirestoreDB)
+        {user-id :user-id
+         email :email} (current-user)]
+    (await (.insertNote fdb
+                        (w/stringify-keys
+                         (-> note
+                             (update
+                              :roles
+                              #(or % {user-id "owner"}))
+                             (assoc :imported true)
+                             (update :tags #(into [] (conj % "imported")))))
+                        user-id
+                        (:id note)
+                        email
+                        .updateUpdatedAt false))))
+
+(defn function-call [name params]
+  (await
+   (.call
+    (FirebaseFunctions.instance.httpsCallable name)
+
+    (dutils/stringKeys
+     params))))
+
+(defn dart->clj-ds [m]
+  (cond
+    (instance? Map m) (into {} (map (fn [[k v]]
+                                      [(dart->clj-ds k)
+                                       (dart->clj-ds v)])) m)
+    (instance? List m) (into [] (map dart->clj-ds) m)
+    :else m))
+
+(defn uid []
+  (let [user (-> FirebaseAuth .-instance .-currentUser)]
+    (when user (.-uid user))))
+
+(defn init-new-note []
+  (let [uid (uid)]
+    {:roles
+     {uid "owner"}
+     :id (str (random-uuid))
+     :title ""
+     :tags []
+     :sections {}
+     :owner uid
+     :user_access [uid]
+     :created_at (.now DateTime)
+     :updated_at (.now DateTime)
+     :plaintext ""}))
+
+(defn note-contains-section? [note section-type]
+  (some (fn [[_ section]]
+          (if (= "table2" section-type)
+            (or (= "table" (section "type"))
+                (= "table2" (section "type")))
+
+            (= section-type
+               (section "type"))))
+        (:sections note)))
+
+(defn firestore-stream->map [stream]
+  (when (and stream (.-exists stream))
+    (dart->clj-ds
+     (.data stream))))
+
+(defn snackbar
+  "Action example (m/SnackBarAction .label string .OnPressed (fn [] )"
+  [scaffold-messenger text & [action?]]
+  (if action?
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar
+                    .content (m/Text text)
+                    .persist false)
+                   .action action?)
+
+    (.showSnackBar scaffold-messenger
+                   (m/SnackBar .content (m/Text text)))))
+
+(defn url-button [{:keys [url text-preview]}]
+  (f/widget
+   :watch [brightness (rd/subscribe [::get-brightness])]
+   :let [^m/TextStyle faded (theme/faded-text-style brightness)]
+   :get {{tthm .-textTheme} m/Theme}
+
+   (m/TextButton
+    .child
+    (m/Text
+     (if (string/blank? text-preview)
+       (string/replace
+        (if (> (count url) 40)
+          (str (subs url 0 39) "...")
+          url)
+        #"https://|www." "")
+       text-preview)
+     .overflow m/TextOverflow.ellipsis
+     .style (.merge faded (.-bodySmall tthm)))
+
+    .onPressed (fn []
+                 (url/launch (if (string/includes? url "http")
+                               url
+                               (str "https://" url)))
+                 nil))))
+
+(defn schedule-alarm [{:keys [content description section-name note-id alarm-id section section-id]}]
+  (let [duration (Duration
+                  .seconds (or (content "seconds") 0)
+                  .minutes (or (content "minutes") 0)
+                  .hours (or (content "hours") 0))
+        dt (.add (DateTime.now) duration)
+        settings (alarm/AlarmSettings
+                  .payload (prn-str
+                            {:section-name section-name
+                             :note-id note-id
+                             :section-id section-id
+                             :section-position (section "section-position")
+                             :seconds (or (content "seconds") 0)
+                             :minutes (or (content "minutes") 0)
+                             :hours (or (content "hours") 0)})
+
+                  .androidFullScreenIntent false
+                  .id alarm-id
+                  .loopAudio true
+                  .vibrate true
+                  .dateTime dt
+
+                  .assetAudioPath "assets/alarm.mp3"
+
+                  .volumeSettings ^:unique (alarm/VolumeSettings.fade
+                                            .fadeDuration (Duration .seconds 10))
+
+                  .notificationSettings (alarm/NotificationSettings
+                                         .icon "assets/do_logo"
+                                         .title section-name
+                                         .body (or description section-name "Alert!")
+                                         .stopButton "Stop"))]
+    (await (alarm/Alarm.set
+            .alarmSettings settings))
+    nil))
+
+(defn safe-substring [s start end]
+  (subs (str s) start (min (count s) end)))
+
+(def fullscreen-animation-duration (Duration .milliseconds 600))
+(def wide-screen-threshold 800)
+
+(def decimal-number-format (NumberFormat "#.##"))
+
+(defn format-number [v]
+  (str (.format decimal-number-format v)))
+
+;; (def android-notification-details
+;;   (ln/AndroidNotificationDetails
+;;    "Reminders"
+;;    "Reminders"
+;;    .channelDescription "Reminders"
+;;    .importance ln/Importance.max
+;;    .playSound true
+;;    .enableVibration true
+;;    .actions
+;;    [(ln/AndroidNotificationAction
+;;      "postpone-30"
+;;      "Delay 30 min")
+
+;;     (ln/AndroidNotificationAction
+;;      "postpone-24"
+;;      "Delay 24 hr")
+
+;;     (ln/AndroidNotificationAction
+;;      "finish"
+;;      "Finish")]))
+
+(defmacro unfocus-then-run [& body]
+  `(do
+     (.unfocus (.-primaryFocus (.instance m/FocusManager)))
+     (.addPostFrameCallback
+      (.-instance m/WidgetsBinding)
+      (fn [_#]
+        ~@body))))
+
+(defn smart-sort-list [items]
+
+  (when (seq items)
+    (try
+      (let [raw (mapv #(% "data") items)
+            output (await (.call (FirebaseFunctions.instance.httpsCallable "sort_list_req")
+                                 (dutils/stringKeys {"items" raw})))
+            sorted-names (get (.-data output) "sorted")
+            ;; Create a map of data name to its index in sorted list
+            position-map (zipmap sorted-names (range))
+            ;; Sort items based on index of their data name in sorted-names
+            sorted-items (sort-by #(get position-map (% "data")) items)]
+
+        (into [] sorted-items))
+      (catch Exception e nil))))
+
+;; (defn native-ad [*loaded? android-ad-unit ios-ad-unit]
+;;   (NativeAd
+;;    .adUnitId (cond
+;;                (or kDebugMode kProfileMode kIsWeb) "ca-app-pub-3940256099942544/2247696110" ;;test ad
+;;                Platform.isAndroid android-ad-unit
+;;                :else ios-ad-unit) ;;iOS
+;;    .listener (NativeAdListener
+;;               .onAdLoaded (fn [ad]
+;;                             (reset! *loaded? true))
+
+;;               .onAdFailedToLoad (fn [ad error]
+;;                                   (println "ad load failed: " error)))
+;;    .request (gms/AdRequest)
+;;    .nativeTemplateStyle (gms/NativeTemplateStyle
+;;                          .templateType gms/TemplateType.small)))
+
+;; (defn edit-page-native-ad
+;;   "This is the native ad for the edit page. We put it here so that we can preload it so that it's immediately ready when starting a new note."
+;;   [background-color]
+;;   (NativeAd
+;;    .adUnitId
+;;    (cond
+;;      (or kDebugMode kProfileMode kIsWeb) "ca-app-pub-3940256099942544/2247696110" ;;test ad
+;;      Platform.isAndroid "ca-app-pub-3357568233312711/1834604658"
+;;      :else "ca-app-pub-3357568233312711/4816825368") ;;iOS
+
+;;    .listener (NativeAdListener
+;;               .onAdLoaded (fn [ad]
+;;                             (println "ad loaded")
+;;                             (rd/dispatch [::set-native-loaded-status true]))
+
+;;               .onAdFailedToLoad (fn [ad error]
+;;                                   (println "ad load failed: " error)))
+
+;;    .request (gms/AdRequest)
+
+;;    .nativeTemplateStyle (gms/NativeTemplateStyle
+;;                          .templateType gms/TemplateType.small
+;;                          .mainBackgroundColor background-color)))
+
+(defn all-sections-empty? [sections]
+  (reduce-kv (fn [_ _ section]
+               (let [content (section "content")
+                     empty-content? (case (section "type")
+                                      "table" (empty? content)
+                                      "media" (empty content)
+                                      "list" (and (empty content)
+                                                  (empty (section "checked-content")))
+                                      "reminder" false
+                                      "text" (string/blank? content))]
+
+                 (if (not empty-content?)
+                   (reduced false)
+                   true)))
+             false
+             sections))
+
+(def elevated-button-style
+  (m/ElevatedButton.styleFrom
+   .shape (m/RoundedRectangleBorder
+           .borderRadius (m/BorderRadius.circular 5.0))
+   .elevation 0.4))
+
+(defn outlined-button-style [tthm]
+  (let [color (.-color (.-titleLarge tthm))]
+    (m/OutlinedButton.styleFrom
+     .shape (m/RoundedRectangleBorder
+             .borderRadius (m/BorderRadius.circular 15))
+     .side (m/BorderSide .width 0.4 .color color))))
+
+(defn button-style [tthm button]
+  (let [color (.-color (.-titleLarge tthm))
+        style (outlined-button-style tthm)]
+    (case button
+      "elevated" (m/ElevatedButtonThemeData
+                  .style
+                  (m/ElevatedButton.styleFrom
+                   .elevation 1
+                   .shape (m/RoundedRectangleBorder
+                           .borderRadius (m/BorderRadius.circular 15))
+
+                   .side (m/BorderSide
+                          .style (m/BorderStyle.none))))
+
+      "outlined" (m/OutlinedButtonThemeData .style style))))
+
+(defn url->preview [url]
+  (await (AnyLinkPreview.getMetadata
+          .link url
+          .cache (Duration .days 7)
+          .proxyUrl "https://cors-989769042149.europe-west1.run.app/cors?"
+          .userAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")))
+
+(defn find-urls [text]
+  (let [url-pattern #"https?:\/\/[a-zA-Z0-9\-_]+(\.[a-zA-Z0-9\-_]+)+(:\d+)?(\/[^\s]*)?"
+        urls (->> (re-seq url-pattern (or text ""))
+                  (map first)
+                  vec)
+        previews (await (Future.wait
+                         (map (fn [u]
+                                (url->preview u)) urls)))]
+
+    (map (fn [u p]
+           {:url u
+            :text-preview (str (when p (.-title p)))}) urls previews)))
+
+(defn print [s]
+  (when (or kDebugMode kProfileMode)
+    (println s)))
+
+(defn links [^m/TextTheme tthm]
+  (f/widget
+   :watch [{:keys [plaintext]} (rd/subscribe [::current-note])
+           brightness (rd/subscribe [::get-brightness])]
+   :padding {:horizontal 10}
+   :watch [urls (find-urls plaintext)]
+   :let [^m/TextStyle faded (.merge
+                             (.-bodySmall tthm)
+                             (theme/faded-text-style brightness))]
+   (m/Align
+    .alignment m/Alignment.bottomLeft)
+   (m/Wrap
+    .children (map url-button urls))))
+
+(defn url-buttons [text]
+  (f/widget
+   :watch [{:keys [plaintext]} (rd/subscribe [::current-note])
+           brightness (rd/subscribe [::get-brightness])]
+   :padding {:horizontal 10}
+   :watch [urls (find-urls text)]
+   :get {{tthm .-textTheme} m/Theme}
+   :let [^m/TextStyle faded (.merge
+                             (.-bodySmall tthm)
+                             (theme/faded-text-style brightness))]
+   (m/Align
+    .alignment m/Alignment.bottomLeft)
+   (m/Wrap
+    .children (map url-button urls))))
+
+(defn reset-content [content v]
+  (cond
+    (string? content) ""
+    (= "reminder" (v "type"))
+    {"datetime"
+     (Timestamp.fromDate
+      (.toUtc (.now DateTime)))
+     "description" ""
+     "id" (str (random-uuid))
+     "finished" false}
+
+    (= "timer" (v "type"))
+    content
+
+    (= "table" (v "type"))
+    [{"id" (str (random-uuid))
+      "data" (into {}
+                   (map
+                    (fn [k]
+                      [k ""])
+                    (keys ((first content) "data"))))}]
+
+    (= "table2" (v "type"))
+    [{"id" (str (random-uuid))
+      "data" (into {}
+                   (map
+                    (fn [k]
+                      [k ""])
+                    (keys ((first content) "data"))))}]
+
+    (= "list" (v "type")) [{"id" (str (random-uuid))
+                            "children" []
+                            "data" ""}]
+    :else (empty content)))
+
+(defn clone-note
+  "Clones a note. It is important that the new note is initated via init-new-note,
+  because simply copying the old note and emptying the sections could lead to copying unwanted fields. For example, for default notes which have a :default key, any clones of those should not be treated as default notes."
+  [note ^m/ScaffoldMessengerState scaffold-messenger premium?]
+  (log-analytics "note_cloned")
+  
+  (let [default-note (init-new-note)]
+    (-> default-note
+        (assoc :tags (:tags note)
+               :just-cloned true)
+        (assoc
+         :sections
+         (into {} (map (fn [[k v]]
+                         (let [id (str (random-uuid))
+                               v (-> v
+                                     (update "content" #(reset-content % v))
+                                     (assoc "id" id))]
+                           [id (cond
+                                 (= "list" (v "type")) (update v "checked-content" #(empty %))
+                                 (= "voice" (v "type")) (assoc v "start-recording?" false)
+                                 :else v)])))
+               (:sections note))))))
+
+(defn reset-checkboxes [note]
+  (into {} (for [[section-id section] (:sections note)]
+             (cond
+               (= "list" (section "type"))
+               [section-id (update section "content"
+                                   (fn [c]
+                                     (mapv
+                                      #(assoc % "checkbox" false) c)))]
+
+               (= "table2" (section "type"))
+               [section-id (update section "content"
+                                   (fn [rows]
+                                     (mapv #(assoc % "checkbox" false) rows)))]
+
+               (= "voice" (section "type")) [section-id (assoc section "content"
+                                                               {})]
+               (= "media" (section "type")) [section-id (update section "content" empty)]
+               :else [section-id section]))))
+
+(defn get-new-plaintext [plaintext]
+  ;;If there was no plaintext then let it be, we'll compute title in other ways.
+  (if (< 0 (count plaintext))
+    (if-let [match (or (re-find #"-(\d+)$" plaintext)
+                       (re-find #" (\d+)$" plaintext))]
+      (let [num (int/parse (second match))
+            base (subs plaintext 0 (- (count plaintext) (count (first match))))]
+        (str (string/trim base) " " (inc num)))
+      (str (string/trim plaintext) " 1"))
+    ""))
+
+(defn log-crashlytics [log]
+  (when (and
+         (not kIsWeb)
+         (not kDebugMode))
+    (FirebaseCrashlytics.instance.log log)))
+
+(defn outline
+  ([child] (outline child 0.5 1 20))
+
+  ([child glow-opacity border-thickness border-radius]
+   (ZoAnimatedGradientBorder
+    .glowOpacity glow-opacity
+    .borderRadius border-radius
+    .animationCurve m/Curves.linear
+    .borderThickness border-thickness
+    .gradientColor [m/Colors.yellow m/Colors.orange]
+
+    .animationDuration (Duration .seconds 4)
+    .child child)))
+
+(defn log-analytics
+  "DON'T PUT SPACES IN HERE"
+  ([name] (log-analytics name {}))
+  ([name parameters]
+   (assert (not (string/includes? name "-")))
+   (doseq [[k v] parameters]
+     (println "LOG ANALYTICS " k v)
+     (assert (not (string/includes? k "-")))
+     (assert (not (string/includes? (str v)  "-"))))
+
+   (when (not kDebugMode)
+     (let [analytics (await (.instance fa/FirebaseAnalytics))]
+       (.logEvent analytics
+                  .name name
+                  .parameters
+                  (dutils/convertToStr (Map.from parameters)))))))
+
+(defn init-new-recording-note []
+  (let [uid (uid)]
+    {:roles
+     {uid "owner"}
+     :id (str (random-uuid))
+     :start-recording? true
+     :sections  (let [m (default-section-map "voice" 0 "voice")]
+                  {(m "id") (assoc m "start-recording?" true)})
+     :title ""
+     :owner uid
+     :tags []
+     :user_access [uid]
+     :created_at (.now DateTime)
+     :updated_at (.now DateTime)
+     :plaintext ""}))
+
+(defn headline
+  ([^m/TextTheme tthm level] (headline tthm level nil))
+  ([^m/TextTheme tthm level decoration]
+   (let [size (case level
+                8 (.-headlineLarge tthm)
+                7 (.-headlineMedium tthm)
+                6 (.-titleLarge tthm)
+                5 (.-titleMedium tthm)
+                4 (.-labelLarge tthm)
+                3 (.-labelMedium tthm)
+                2 (.-bodyLarge tthm)
+                1 (.-bodyMedium tthm))]
+     (if decoration
+       (.copyWith
+        size)
+       size))))
+
+(defn set-crash-key [k v]
+  (when (not kIsWeb)
+    (FirebaseCrashlytics.instance.setCustomKey
+     (str k) (str v))))
+
+(defn restore-purchase []
+  (let [info (await (rc/Purchases.restorePurchases))
+        entitlements (into {} (.-all (-> info .-entitlements)))
+        active? (when (seq entitlements)
+                  (.-isActive (entitlements "full-access")))]
+    (rd/dispatch [::set-key :premium? active?])))
+
+(defn set-premium []
+  (let [status (if
+                kIsWeb (await (dutils/getSubscriptionStatusWeb (uid)))
+
+                (let [^rc/CustomerInfo info (await (rc/Purchases.getCustomerInfo))
+                      entitlements (into {} (.-all (-> info .-entitlements)))]
+                  (when (seq entitlements)
+                    (.-isActive (entitlements "full-access")))))]
+    (println "setting premium: " status)
+    (rd/dispatch [::set-key :premium? status])))
+
+(defn init-revenuecat- [user-id]
+  (when (and (some? user-id)
+             (not kIsWeb))
+    (let [config
+          (cond
+            Platform.isAndroid
+            (rc/PurchasesConfiguration secrets/revenueCatAndroid)
+            Platform.isIOS
+            (rc/PurchasesConfiguration secrets/revenueCatIos))]
+
+      (.-appUserID! config user-id)
+      (await (rc/Purchases.configure config))))
+  ;;Always set premium, even for web
+  (await (set-premium)))
+
+(defn paywall [^m/ScaffoldMessengerState scaffold-messenger]
+  (println "paywall")
+  (if kIsWeb (snackbar scaffold-messenger "This feature requires a premium account. Please subscribe to premium using the Android or iOS app and then try again.")
+      (when
+       (= rcu/PaywallResult.purchased
+          (await (rcu/RevenueCatUI.presentPaywallIfNeeded
+                  "full-access"
+                  .displayCloseButton true)))
+        (rd/dispatch [::set-key :premium? true])
+        (snackbar scaffold-messenger "Premium granted! It should be ready immediately. If not, please restart the app."))))
+
+(defn prompt-to-paywall [^m/ScaffoldMessengerState scaffold-messenger prompt]
+  (.showSnackBar
+   scaffold-messenger
+   (m/SnackBar
+    .content (m/Text prompt)
+    .action (m/SnackBarAction
+             .label "Subscribe"
+             .onPressed
+             (fn []
+               (paywall scaffold-messenger)
+               nil)))))
+
+(defn show-login [ctx ^m/ScaffoldMessengerState scaffold-messenger]
+  (-> ctx go_router/GoRouterHelper
+      (.pushNamed
+       "login"))
+  (.showSnackBar
+   scaffold-messenger
+   (m/SnackBar
+    .content (m/Text "Please register for cloud backups and multi-device sync."))))
+
+(defn delete-note [id]
+  (let [uid (:user-id (current-user))
+        db (fdb/FirestoreDB)]
+    (try (await (.deleteNote db
+                             id
+                             uid))
+         (catch dynamic e))))
+
+(defn should-show-ads? [can-request-ads?]
+  (Future/delayed
+   (Duration .milliseconds 5)
+   (fn []
+     false)))
+
+(defn map-deep-into [m]
+  (into {}
+        (for [[k v] m]
+          [k (cond
+               (instance? #/(Map String dynamic) v) (map-deep-into v)
+               :else v)])))
+
+(defn vec-remove
+  "Remove elem in coll by index."
+  [coll pos]
+  (vec (concat (subvec coll 0 pos) (subvec coll (inc pos)))))
+
+(defn vec-add
+  "Add elem in coll by index."
+  [coll pos el]
+  (vec (concat (subvec coll 0 pos) [el] (subvec coll pos))))
+
+(defn vec-move
+  "Move elem in coll by index, handling out of bounds indices"
+  [coll pos1 pos2]
+  (if (empty? coll)
+    coll
+    (let [el (nth coll pos1)]
+      (if (= pos1 pos2)
+        coll
+        (vec-add (vec-remove coll pos1) pos2 el)))))
+
+(defn uniq-by
+  ""
+  [f items]
+  (:uniq (reduce (fn [acc m]
+                   (let [k (f m)]
+                     (if (get-in acc [:seen k])
+                       acc
+                       (-> acc
+                           (update :seen assoc k true)
+                           (update :uniq conj m)))))
+                 {:seen {} :uniq []}
+                 items)))
+
+(comment
+  (uniq-by :name [{:name "Bob"} {:name "Jane"} {:name "Bob"}]))
+
+(defn list-completion [notes]
+    ;;All list items
+  (take 500
+        (uniq-by :data
+                 (flatten
+                  (map (fn [{:keys [sections]}]
+                         (keep (fn [[_ {:strs [type content checked-content]}]]
+                                 (when (= "list" type)
+                                   (flatten
+                                    (for [c [content checked-content]]
+                                      (for [item c
+                                            :when item]
+                                        {:id (item "id")
+                                         :data (string/trim (str (item "data")))})))))
+                               sections))
+                       (take 100 notes))))))
+
+(defn table-completion [notes]
+  (group-by
+   :c
+   (take 500
+         (distinct
+          (flatten
+           (for [n (take 100 notes)]
+             (for [[_ section] (take 10 (:sections n))
+                   :when (= "table2" (section "type"))
+                   row (take 20 (section "content"))
+                   :when (seq (section "content"))
+                   [c v] (take 30 (row "data"))
+                   :when (seq (row "data"))]
+               {:string v
+                :c c
+                :row (row "data")})))))))
+
+(defn collision-counter [s]
+  (if (re-find #"\((\d+)\)$" s)
+    (clojure.string/replace s #"\((\d+)\)$"
+                            #(str "(" (inc (int.parse (second %))) ")"))
+    (str s " (1)")))
+
+(defn current-user []
+  (let [user (-> FirebaseAuth .-instance .-currentUser)]
+    (when user {:user-id (.-uid user)
+                :email (.-email user)})))
+
+(defn map-deep-into [m]
+  (into {}
+        (for [[k v] m]
+          [k (cond
+               (instance? #/(Map String dynamic) v) (map-deep-into v)
+               :else v)])))
+
+(defn sort-by-order [items order-list]
+  (let [type-index (zipmap order-list (range))]
+    (sort-by #(get type-index (get (second %) "type")) items)))
+
+(defn merge-text [t1 t2]
+  (if (string/includes? (or t1 "")
+                        (or t2 ""))
+    t1
+    (string/join "\n" [t1 t2])))
+
+(defn add-rowcalcs-to-columns? [columns rowcalcs]
+  (for [rc rowcalcs]
+    (let [cols (into #{} (rc "columns"))
+          constant (rc "constant")
+          sign (case (rc "operation")
+                 "sum" "+"
+                 "multiply" "*")
+          calc-header (keep (fn [c]
+                              (when (cols (c "cid"))
+                                (c "name"))) columns)]
+      (str "("
+           sign
+           " "
+           (string/join " " calc-header)
+           (when constant (str " " constant))
+           ")"))))
+
+(defn table2-calculate-rows [rowcalcs columns rows]
+  (println "columns" columns)
+  (println "rows" rows)
+  (map
+   (fn [row]
+     (let [data (row "data")]
+       (map
+        (fn [rc]
+          (let [op (case (rc "operation")
+                     "sum" +
+                     "multiply" *)
+                zero (case (rc "operation")
+                       "sum" 0
+                       "multiply" 1)
+                cols (into #{} (rc "columns"))
+                constant (rc "constant")
+                [s processed?]
+                (reduce-kv
+                 (fn [[acc processed?] k v]
+                   (if (cols k)
+                     (try
+                       [(op acc (double.parse (str v))) true]
+                       (catch FormatException e
+                         [acc processed?]))
+                     [acc processed?]))
+                 [zero false]
+                 data)
+                s (if processed? s 0)
+                result (if constant
+                         (op constant s)
+                         s)]
+            (str result)))
+        rowcalcs)))
+   rows))
+
+(defn table2-calculate-columns [calculations columns rows]
+  (let [cids (set (keys calculations))]
+    (map
+     (fn [col]
+       (let [cid (col "cid")]
+         (if (contains? cids cid)
+           (let [op (case (calculations cid)
+                      "sum" +
+                      "multiply" *)
+                 zero (case (calculations cid)
+                        "sum" 0
+                        "multiply" 1)
+                 result (reduce
+                         (fn [acc row]
+                           (let [val (get-in row ["data" cid])]
+                             (try
+                               (op acc (double.parse (str val)))
+                               (catch FormatException e
+                                 acc))))
+                         zero
+                         rows)]
+             (str (case (calculations cid)
+                    "sum" "+"
+                    "multiply" "*")
+                  result))
+           ""))) ; if no calculation, leave blank
+     columns)))
+
+(defn get-download-links [folder-id]
+  (let [storage-ref (FirebaseStorage.instance.ref)
+        path (str "/media/"
+                  (:user-id (current-user))
+                  "/"
+                  folder-id)
+        images-ref (await
+                    (.listAll
+                     (.child storage-ref path)))
+        urls (await (Future.wait (mapv #(.getDownloadURL %) (.-items images-ref))))]
+    (mapv (fn [url item]
+            {:url url
+             :ref item}) urls (.-items images-ref))))
+
+(defn update-item-and-children
+  "Recursively update checkbox state for an item and all its children"
+  [item checked?]
+  (if checked?
+    (-> item
+        (assoc "checkbox" true)
+        (update "children" #(mapv (fn [child] (update-item-and-children child true)) %)))
+    item))
+
+(defn merge-vectors
+  "Add all missing elements in v2 to v1"
+  [v1 v2]
+  (vec (concat v1 (remove (set v1) v2))))
+
+(defn first-section-with-content [sections]
+  ;;First try to get a section with proper content
+  (if-let [s (some (fn [s]
+                     (let [section (second s)]
+
+                       (case (section "type")
+                         "text" (when (not (string/blank? (section "content")))
+                                  s)
+
+                         "list" (when (seq (section "content"))
+                                  s)
+
+                         "table2" (when (seq (section "content"))
+                                    s)
+
+                         "table" (when (seq (section "content"))
+                                   s)
+
+                         "reminder" (let [desc (get-in section ["content" "description"])]
+                                      (when (not (string/blank? desc))
+                                        s))
+                         "voice" (when-let [t (get-in section ["content" "transcription2"])]
+                                   t)
+                         nil)))  (sort-by (fn [[_ {:strs [section-position]}]]
+                                            section-position)
+                                          sections))]
+    s
+    ;;But if that doesn't exist we'll have to try just the section names.
+    (first (sort-by-order sections ["reminder" "table" "list" "text" "media"]))))
+
+(defn reminder-string [content timeformat-24-hours?]
+  (if (content "datetime")
+    (let [^Timestamp ts (content "datetime")
+          dt (df/DateFormatter.getVerboseDateTimeRepresentation (.toLocal (.toDate ts)) timeformat-24-hours?)]
+      (if (string/blank? (content "description"))
+        (str dt)
+        (str dt ": " (content "description"))))
+    "Reminder without date set"))
+
+(defn list-string [content section-name]
+  (if (seq content)
+    (clojure.string/join ", " (map (fn [{:strs [data children]}]
+                                     (if (seq children)
+                                       (str data ", "
+                                            (clojure.string/join ", "
+                                                                 (map (fn [{:strs [data]}] data)
+                                                                      children)))
+                                       data)) (take 3 content)))
+    section-name))
+
+(defn table-string [rows columns section-name]
+  (if
+      ;;This checks if there is content to use as title
+   (and (seq rows) ;;there is a row
+           ;;... and the content in the first column isn't blank
+        (not (string/blank?
+              (-> rows
+                  first
+                  (#(% "data"))
+                  (#(% (first columns)))))))
+    (string/join ", "
+                 (map (fn [{:strs [data]}]
+                        (data (first columns)))
+                      (take 3 rows)))
+    (if (= "table" section-name)
+      (string/join " | " (take 3 columns))
+      section-name)))
+
+(defn table2-string [rows columns section-name]
+  (if
+      ;;This checks if there is content to use as title
+   (and (seq rows) ;;there is a row
+        (not (string/blank?
+              (-> rows
+                  first
+                  (#(% "data"))
+                  (#(% ((first columns) "cid")))))))
+    (str (string/join ", "
+                      (map (fn [{:strs [data]}]
+                             (data ((first columns) "cid")))
+                           (take 3 rows))))
+    (if (= "table" section-name)
+      (string/join " | " (take 3 (map #(% "name") columns)))
+      section-name)))
+
+(defn gps-string [content]
+  (println "gps content " content)
+  (if-let [p (content "placemark")]
+    (let [pp (dart->clj-ds
+              (c/jsonDecode p))]
+      (string/join ", "
+                   (filter #(not (string/blank? %))
+                           [(pp "street")  (pp "postalCode") (pp "locality") (pp "country")])))
+    "location"))
+
+(defn make-plaintext [[section-id {:strs [type content columns name] :as m}] timeformat-24-hours?]
+  (let [section-name name]
+    (case type
+      nil ""
+      "table" (table-string content columns section-name)
+      "table2" (table2-string content columns section-name)
+
+      "list" (list-string content section-name)
+      "text" (if (string/blank? content) section-name content)
+      "media" (let [captions (or (content "captions" {}))]
+                (or
+                 (first
+                  (vals captions))
+                 "media"))
+      "media2" (let [captions (or (content "captions" {}))]
+                 (or
+                  (first
+                   (vals captions))
+                  (if (= "media2" section-name)
+                    "media"
+                    section-name)))
+      "location" (gps-string content)
+      "reminder" (reminder-string content timeformat-24-hours?)
+      "voice" (if-let [t (content "transcription")]
+                t
+                "voice-recording")
+      (str section-name))))
+
+(defn default-title [title plaintext  created_at sections timeformat-24-hours?]
+  (let [first-line (string/trim (first (string/split plaintext #"[`\n]")))
+        section (make-plaintext (first-section-with-content sections) timeformat-24-hours?)]
+
+    (cond
+      (and (not (string/blank? title))
+           (not (string/blank? first-line))
+           (not (string/blank? section))) (str title "\n" first-line "\n" section)
+      (string/blank? first-line) section
+      (string/blank? section) first-line
+      :else (str first-line ": " section))))
+
+(defn default-title-note-input [note]
+  (default-title (:title note) (:plaintext note) (:created_at note) (:sections note) false))
+
+(defn default-section-map [section-type number-of-existing-sections name]
+  (println "default section map")
+  (merge {"type" section-type
+          "name" (string/capitalize (str name))
+          "section-position" number-of-existing-sections
+          "id" (str (random-uuid))}
+
+         (case section-type
+           "location" {"content" {}}
+           "alarm" {"content" {}}
+           "mindmap" {"content" {"parent" nil
+                                 "children" nil}}
+           "timer" {"content" {"seconds" 0
+                               "minutes" 0
+                               "hours" 0}
+                    "description" ""}
+
+           ;;This is the old table which shouldn't be used anymore
+           ;;Shown here if structure needs to be reffered to
+           ;; "table" {"columns" ["A" "B"]
+           ;;          "content" [{"id" (str (random-uuid))
+           ;;                      "data" {"A" ""
+           ;;                              "B" ""}}
+           ;;                     {"id" (str (random-uuid))
+           ;;                      "data" {"A" ""
+           ;;                              "B" ""}}]}
+
+           "table2" (let [aid (str (random-uuid))
+                          bid (str (random-uuid))]
+
+                      {"columns" [{"name" "A"
+                                   "cid" aid}
+                                  {"name" "B"
+                                   "cid" bid}]
+
+                       "content" [{"id" (str (random-uuid))
+                                   "data" {aid ""
+                                           bid ""}}
+                                  {"id" (str (random-uuid))
+                                   "data" {aid ""
+                                           bid ""}}]})
+
+           "draw2" {"content" {"captions" {}}}
+
+           "media2" {"content" {"captions" {}}}
+           "voice" {"content" {}}
+
+           "list"
+           {"content" [{"id" (str (random-uuid))
+                        "children" []
+                        "data" ""}]
+            "checked-content" [] ;;same datastructure as "content". checking/unchecking sends items between these two keys
+            "checkboxes-visible" true}
+           "reminder"
+           {"content" {"datetime"
+                       (let [current-date (.now DateTime)]
+                         (Timestamp.fromDate
+                          (.toUtc (.add (DateTime
+                                         (.-year current-date)
+                                         (.-month current-date)
+                                         (.-day current-date)
+                                         (.-hour current-date)
+                                         0)
+                                        (Duration .days 1)))))
+                       "description" ""
+                       "id" (str (random-uuid))
+                       "finished" false}}
+           "text" {"content" ""})))
+
+(defn user-is-anonymous []
+  (let [user? (.-currentUser (FirebaseAuth.instance))]
+
+    (when user?
+      (.-isAnonymous user?))))
+
+(defn select-all-notes []
+
+  (let [uid (uid)
+        db (fdb/FirestoreDB)
+        notes (when uid (await (.getAllNotes db uid)))]
+
+    (into []
+          (for [note notes
+                :let [n (into {} (for [[k v] note]
+                                   [(keyword k) (dart->clj-ds v)]))]
+                :when (or (not (string/blank? (:plaintext n)))
+                          (not (string/blank? (:title n)))
+                          (seq (:sections n))
+                          (seq (:tags n)))]
+            n))))
+
+(defn move-notes-to-section-id-key [notes]
+    ;;Already migrated (uuids are 36 long, old section-names max 30)
+  (let [already-migrated? (some (fn [note]
+                                  (= 36 (count (-> note :sections first first))))
+                                notes)
+        new-notes
+        (if  already-migrated?
+          notes
+          (into []
+                (for [n notes]
+                  (update
+                   n
+                   :sections
+                   (fn [sections]
+                     (into {}
+                           (for [[section-name section] sections]
+                             (cond
+                               ;;Double check if first note didn't have sections
+                               (= 36 (count section-name))
+                               [section-name section]
+
+                               (section "id")
+                               [(section "id")
+                                (assoc section "name" section-name)]
+
+                               :else (let [id (str (random-uuid))]
+                                       [id
+                                        (assoc section
+                                               "name" section-name
+                                               "id" id)])))))))))]
+
+    (when (not already-migrated?)
+      (rd/dispatch [::save-notes-event-fx new-notes]))
+
+    new-notes))
+
+(defn sort-reminders
+  "Put any finished reminders at the bottom, otherwise sort by date"
+  [reminders]
+  (sort-by (fn [reminder]
+             [(if (reminder "finished") 1 0)
+              (reminder "date")])
+           reminders))
+
+(defn note-reminders
+  "If a note has a reminder, returns the content as a map. Since a note can contain many reminders it needs to be flattened."
+  [note]
+  (keep (fn [[section-name {:strs [type content id]  :as m}]]
+          (when (= type "reminder")
+            (-> content (assoc
+                         "note-id" (:id note)
+                         "section-id" id
+                         "section-name" section-name)
+                (update "description"
+                        (fn [d]
+                          (cond
+                            (not (string/blank? d)) d
+                            (not (string/blank? (:title note))) (:title note)
+                            :else (:plaintext note)))))))
+        (:sections note)))
+
+(defn upload-token [token uid]
+  (println "upload token " uid)
+  (let [device-ref (.doc (FirebaseFirestore.instance.collection "devices")
+                         uid)
+        tokens {"tokens"
+                {token {"createdAt" (DateTime.now)
+                        "lastUsed" (DateTime.now)
+                        "isActive" true}}}]
+
+    (await (.set device-ref
+                 tokens
+                 (SetOptions .merge true)))))
+
+(defn remote-conf
+  ([key] (remote-conf key :string))
+  ([key type]
+   (let [rc frc/FirebaseRemoteConfig.instance
+         v (case type
+             :bool (.getBool rc key)
+             :string (.getString rc key)
+             :double (.getDouble rc key)
+             :int (.getInt rc key))]
+     v)))
+
+(defn request-notification-permission [& [always-request?]]
+
+  (let [is-allowed? (await (.isNotificationAllowed (notif/AwesomeNotifications)))]
+    (when (not is-allowed?)
+      (let [prefs (await (sp/SharedPreferences.getInstance))
+            requested? (await (.getBool prefs "requested_notification_permission"))]
+
+        (when (or (not requested?) always-request?)
+          (await (.setBool prefs "requested_notification_permission" true))
+          (await (.requestPermissionToSendNotifications
+                  (notif/AwesomeNotifications))))))
+
+    (when-let [token (await (.requestFirebaseAppToken (AwesomeNotificationsFcm)))]
+
+      (await (upload-token token (uid)))))
+
+  nil
+  ;; (let [fi FirebaseMessaging.instance
+  ;;       settings (await (FirebaseMessaging.instance.requestPermission
+  ;;                        .alert true
+  ;;                        .badge true
+  ;;                        .criticalAlert true
+  ;;                        .sound true))
+  ;;       apnsToken (when (and (not kIsWeb) Platform.isIOS)
+  ;;                   (await (FirebaseMessaging.instance.getAPNSToken)))
+  ;;       token
+  ;;       (cond
+  ;;         kIsWeb (FirebaseMessaging.instance.getToken .vapidKey "BOfkI4twQh3a7KPJ5u4daBnWWESqg9zgv-c1wqjUsQ-lqxyWQ-tc_E0W-kfTRnUrJ6XyKNR02gxI1sbj4H1Ge5g")
+
+  ;;         Platform.isIOS (when apnsToken (await (FirebaseMessaging.instance.getToken)))
+
+  ;;         :else (await (FirebaseMessaging.instance.getToken)))]
+  ;;   token)
+  )
+
+(defn register! []
+  (rd/reg-event-fx
+   ::refresh-notes
+   (fn [{:keys [db]} _]
+     {:db db
+      ::fetch-notes []}))
+
+  (rd/reg-fx
+   ::load-fcm-fx
+   (fn [_]
+     (when (not kIsWeb)
+       (await (request-notification-permission)))))
+
+  (rd/reg-fx
+   ::schedule-alarm-fx (fn [m] (schedule-alarm m)))
+
+  (rd/reg-event-fx ::schedule-alarm
+                   (fn [{:keys [db]} [_ section-id]]
+                     (let [section (get-in db [:current-note :sections section-id])]
+                       {:db db
+                        ::schedule-alarm-fx {:content (section "content")
+                                             :note-id (get-in db [:current-note
+                                                                  :id])
+                                             :section section
+                                             :section-id section-id
+                                             :section-name (section "name")
+                                             :description (section "description")
+                                             :alarm-id (.hashCode (section "id"))}})))
+
+  (rd/reg-event-fx
+   ::load-fcm
+   (fn [{:keys [db]} _]
+     {:db db
+      ::load-fcm-fx []}))
+
+  (rd/reg-event-fx ::update-user-options
+                   (fn [{:keys [db]} [_ opts]]
+                     {:db db
+                      ::storage-set-user-options opts}))
+  (rd/reg-event-fx ::save-notes-event-fx
+                   (fn [{:keys [db]} [_ notes]]
+                     {:db db
+                      ::save-notes notes}))
+
+  (rd/reg-fx ::save-notes
+             (fn [notes]
+
+               (let [fdb (fdb/FirestoreDB)
+                     {uid :user-id
+                      email :email} (current-user)]
+                 (await
+                  (Future.wait
+                   (mapv (fn [note]
+                           (let [reminders (note-reminders note)
+                                 note' (w/stringify-keys
+                                        (update note
+                                                :roles
+                                                #(or % {uid "owner"})))]
+                             (if reminders
+                               (.insertNote fdb
+                                            note'
+                                            uid
+                                            (:id note)
+                                            email
+                                            .updateUpdatedAt false
+                                            .reminders reminders)
+                               (.insertNote fdb
+                                            note'
+                                            uid
+                                            (:id note)
+                                            email
+                                            .updateUpdatedAt false))))
+                         notes))))))
+
+  (rd/reg-event-fx ::migrate-all-notes-from-anonymous
+                   (fn [{:keys [db]} [_ uid]]
+                     ;;First, simple and fast check to see if we even need to migrate.
+                     ;;If the user is owner of their latest note they weren't just an anonymous user.
+                     (when (and
+                            ;;The first note was not written by a registered user
+                            ;;=> the last user to have written the note was anonymous
+                            (not (:registered? (first (:notes db))))
+                            (some? (:owner (first (:notes db)))))
+                       (let [notes (into []
+                                         (keep (fn [n]
+                                                 ;;Then
+                                                 (when (and
+                                                        (not= (:owner n) uid)
+                                                        (not-any?
+                                                         #(= uid %) (:user_access n)))
+                                                   (-> n
+                                                       (assoc :id (str (random-uuid)))
+                                                       (assoc :owner uid)
+                                                       (update :user_access #(conj % uid))
+                                                       (update :roles {uid "owner"}))))
+                                               (:notes db)))]
+                         {:db db
+                          ::save-notes notes}))))
+
+  (rd/reg-fx ::delete-note-by-id
+             (fn [id]
+               (println "deleting unedited note" id)
+               (let [db (fdb/FirestoreDB)]
+                 (await (.deleteNote db
+                                     id
+                                     (uid))))))
+
+  (rd/reg-event-fx ::delete-if-not-edited
+                   (fn [{:keys [db]} _]
+                     (if (:just-cloned (:current-note db))
+                       {:db db
+                        ::delete-note-by-id (:id (:current-note db))}
+                       {:db db})))
+
+  (rd/reg-sub ::focus-plaintext? (fn [db _]
+                                   (:focus-plaintext? db)))
+  
+  (rd/reg-sub ::enable-clone-highlight (fn [db _]
+                                         (:enable-clone-highlight db)))
+  (rd/reg-sub ::prefs (fn [db _]
+                        (:prefs db {})))
+
+  (rd/reg-sub ::ai-generating?
+              (fn [db _]
+                (:ai-generating-section db)))
+
+  (rd/reg-sub ::reorder-sections?
+              (fn [db _]
+                (:reorder-sections? db)))
+
+  (rd/reg-sub ::premium?
+              (fn [db _]
+                (if (and (not kDebugMode)
+                         (= "true" (remote-conf "everything_free")))
+                  true
+                  (:premium? db true))))
+
+  (rd/reg-sub ::archive
+              (fn [db _]
+                 ;;Default to true, because then we pay the costs of bugs not the premium users.
+                (:archive db)))
+
+  (rd/reg-sub ::onboarding-section
+              (fn [db _]
+                (:onboarding-section db)))
+
+  (rd/reg-sub ::first-tag
+              (fn [db _]
+                (:first-tag db)))
+
+  (rd/reg-sub ::filter-by-section
+              (fn [db _]
+                (:filter-by-section db)))
+
+  (rd/reg-event-db
+   ::replace-current-note-in-notes
+   (fn [db _]
+     (let [index (:id->saved-notes-index db)
+           note (-> (:current-note db)
+                    (update :created_at #(if % (.toDate %)
+                                             (.subtract (DateTime.now) (Duration .minutes 1))))
+                    (update :updated_at #(if % (.toDate %)
+                                             (DateTime.now))))
+           pinned-at (when-let [p (:pin note)]
+                       (.toDate p))
+
+           ;;If the note is pinned it should have a stable location
+           ;;if not it should just go to the top.
+           insertion-index (if (:pin note)
+                             (count (take-while (fn [{:keys [pin]}]
+
+                                                  (when pin
+                                                    (.isBefore (.toDate pin)
+                                                               pinned-at))) (:notes db)))
+                             0)
+           i (index (:id note))]
+
+       (if i
+         (update db :notes
+                 (fn [notes]
+                   (-> notes
+                       (vec-remove i)
+                       (vec-add insertion-index note))))
+         (update db :notes
+                 (fn [notes]
+                   (vec-add notes insertion-index note)))))))
+
+  (rd/reg-sub ::watch-note-to-open
+              (fn [db _]
+                (:note-to-open db)))
+
+  ;; (rd/reg-event-db ::refresh-native-ad
+  ;;                  (fn [db [_ theme]] ;;get theme with m/Theme
+  ;;                    (if (and (:should-show-ads db)
+  ;;                             (not= :loading (:native-ad-loaded db)))
+  ;;                      (let [old-ad? (:native-ad db)
+  ;;                            ^NativeAd ad (edit-page-native-ad
+  ;;                                          (.-surface (.-colorScheme theme)))]
+  ;;                        (when old-ad?
+  ;;                          (println "disposing old ad")
+  ;;                          (.dispose old-ad?))
+  ;;                        (.load ad)
+  ;;                        (println "Loading new ad")
+  ;;                        (assoc db
+  ;;                               :native-ad ad
+  ;;                               :native-ad-loaded :loading))
+  ;;                      db)))
+
+  (rd/reg-event-db ::set-native-loaded-status
+                   (fn [db [_ status]]
+                     (assoc db :native-ad-loaded status)))
+
+  (rd/reg-sub ::native-ad-sub
+              (fn [db _]
+                (:native-ad db)))
+
+  (rd/reg-sub ::native-loaded-status-sub
+              (fn [db _]
+                (:native-ad-loaded db false)))
+
+  (rd/reg-event-fx ::redo
+                   (fn [{:keys [db]} _]
+                     (if-let [last-note (first (:redo db))]
+                       {:db (-> db
+                                (update :undo #(conj % (:current-note db)))
+                                (assoc :current-note last-note))
+
+                        ::set-new-plaintext-fx (:plaintext last-note)
+                        ::set-new-title-fx (:title last-note)
+                        ::upload-note-fx {:note last-note
+                                          :update-updated-at? false}}
+                       {:db db})))
+
+  (rd/reg-event-fx ::undo
+                   (fn [{:keys [db]} _]
+                     (if-let [last-note (first (:undo db))]
+                       {:db (-> db
+                                (update :redo #(conj % (:current-note db)))
+                                (assoc :current-note last-note)
+                                (update :undo rest))
+
+                        ::set-new-plaintext-fx (:plaintext last-note)
+                        ::set-new-title-fx (:title last-note)
+                        ::upload-note-fx {:note last-note
+                                          :update-updated-at? false}}
+                       {:db db})))
+
+  (rd/reg-event-db ::rebuild-folder-id
+                   (fn [db [_ [folder-id v]]]
+                     (update db :rebuild-folder-id
+                             (fn [f] (assoc f folder-id v)))))
+
+  (rd/reg-sub ::rebuild-folder-id-sub
+              (fn [db [_ folder-id]]
+                (get-in db [:rebuild-folder-id folder-id])))
+
+  (rd/reg-event-db ::delete-file-from-folder-id
+                   (fn [db [_ [folder-id file]]]
+                     (update db :media-files
+                             (fn [m]
+                               (update m folder-id
+                                       (fn [folder]
+                                         (disj folder (.-path file))))))))
+
+  (rd/reg-event-db ::add-file-to-folder-id
+                   (fn [db [_ [folder-id file]]]
+                     (update db :media-files
+                             (fn [m]
+                               (update m folder-id
+                                       (fn [folder]
+                                         (conj (or folder #{}) (.-path file))))))))
+
+  (rd/reg-sub ::files-on-disk-sub
+              (fn [db [_ folder-id]]
+                (get-in db [:media-files folder-id])))
+
+  (rd/reg-event-db ::pop-undo (fn [db _]
+                                (update db :undo rest)))
+
+  (rd/reg-event-db ::reset-undo-stack (fn [db _]
+                                        (-> db
+                                            (dissoc :undo)
+                                            (dissoc :redo))))
+
+  (rd/reg-sub ::paywall (fn [db _]
+                          (db :show-paywall? true)))
+
+  (rd/reg-sub ::password (fn [db _]
+                           (db :password)))
+
+  (rd/reg-event-db ::hide-paywall (fn [db _]
+                                    (assoc db :show-paywall? false)))
+
+  (rd/reg-fx ::storage-set-user-options
+             (fn [opts]
+               (let [db FirebaseFirestore.instance
+                     ref (.doc
+                          (.collection db "users")
+                          (uid))]
+                 (.set ref {"preferences" opts} (SetOptions .merge true)))))
+
+  (rd/reg-event-db ::empty-notes
+                   (fn [db _]
+                     (dissoc db :notes)))
+
+  (rd/reg-event-db ::add-batch-delete-note (fn [db [_ id]]
+                                             (update db :batch-delete-notes (fnil conj #{}) id)))
+  (rd/reg-event-db ::remove-batch-delete-note (fn [db [_ id]]
+                                                (update db
+                                                        :batch-delete-notes
+                                                        #(disj % id))))
+
+  (rd/reg-fx ::run-batch-delete
+             (fn [{:keys [ids notes]}]
+               (let [db (fdb/FirestoreDB)]
+
+                 (doseq [id ids
+                         :let [note (notes id)]]
+                   (await (.deleteNote db
+                                       id
+                                       (:user-id (current-user)))))
+
+                 (doseq [id ids
+                         :let [note (notes id)]
+                         [section-id section] (:sections note)
+                         :when (or (= "alarm" (section "type"))
+                                   (= "timer" (section "type")))]
+                   (await (Alarm.stop (.-hashCode section-id)))))
+
+               (rd/dispatch [::refresh-notes])))
+
+  (rd/reg-event-fx ::batch-delete!
+                   (fn [{:keys [db]} _]
+                     {:db (assoc db :batch-delete-notes #{})
+                      ::run-batch-delete {:ids (:batch-delete-notes db)
+                                          :notes
+                                          (into {}
+                                                (for [note (:notes db)]
+                                                  [(:id note) note]))}}))
+
+  (rd/reg-event-db ::cancel-batch-delete
+                   (fn [db _]
+                     (assoc db :batch-delete-notes #{})))
+
+  (rd/reg-sub ::batch-delete-notes (fn [db _]
+                                     (:batch-delete-notes db)))
+
+  (rd/reg-event-db ::set-user-options
+                   (fn [db [_ options]]
+                     (assoc db :user-options options)))
+
+  (rd/reg-event-db ::set-brightness (fn [db [_ brightness]]
+                                      (assoc db :brightness brightness)))
+
+  (rd/reg-sub ::get-brightness (fn [db _]
+                                 (db :brightness)))
+
+  (rd/reg-event-db ::reset-restructure-mode (fn [db _]
+                                              (update db :restructure? {})))
+
+  (rd/reg-event-db ::toggle-restructure-mode
+                   (fn [db [_ section-name]]
+
+                     (update-in db [:restructure? section-name] not)))
+
+  (rd/reg-event-db ::set-restructure-mode (fn [db [_ section-name b]]
+                                            (assoc-in db [:restructure? section-name] b)))
+
+  (rd/reg-sub ::get-restructure-mode (fn [db [_ section-name]]
+                                       (get-in db [:restructure? section-name] false)))
+
+  (rd/reg-sub ::get-restructure-mode-any (fn [db _]
+                                           (:restructure? db)))
+
+  (rd/reg-event-db ::set-focus
+                   (fn [db [_ index key]]
+                     (assoc db key index)))
+
+  (rd/reg-event-db ::set-list-focus
+                   (fn [db [_ id]]
+                     (assoc db :list-focus id)))
+  (rd/reg-event-db ::set-recently-added-item (fn [db [_ id]]
+                                               (assoc db :just-added-item id)))
+  (rd/reg-sub ::get-recently-added-item (fn [db _]
+                                          (db :just-added-item)))
+
+  (rd/reg-event-db ::unset-list-focus?
+                   ;;used so that we can reset the list focus if no items are focused,
+                   (fn [db [_ id]]
+                     (update db :list-focus
+                             #(if (= id (:id %)) nil %))))
+
+  ;;List focus is to know where to put a new item
+  ;;e.g if a user is focusing a subtree then we'll add an item
+  ;;to the subtree.
+  (rd/reg-sub ::get-list-focus
+              (fn [db _]
+                (db :list-focus)))
+
+  (rd/reg-sub ::get-focus (fn [db [_ key]]
+                            (db key)))
+
+  (rd/reg-fx ::storage-fetch-user-options
+             (fn [uid]
+               (let [db (fdb/FirestoreDB)
+                     opts (try (await (.loadPreferences db uid))
+                               (catch dynamic e
+                                 (println "couldn't load user prefernces from firestore")))]
+                 (rd/dispatch [::set-user-options opts]))))
+
+  (rd/reg-event-fx ::fetch-user-options
+                   (fn [{:keys [db]} _]
+                     {:db db
+                      ::storage-fetch-user-options (:user-id (current-user))}))
+
+  (rd/reg-sub ::get-user-options
+              (fn [{:keys [user-options]} _]
+                (or (into {} user-options) {})))
+
+  (rd/reg-event-db ::initiate-new-note
+                   (fn [db _]
+                     (assoc db
+                            :current-note
+                            {:roles
+                             {(:user-id (current-user)) "owner"}
+                             :id (str (random-uuid))
+                             :tags []
+                             :sections {}
+                             :created_at (.now DateTime)
+                             :plaintext ""})))
+
+  (rd/reg-fx ::fetch-notes
+             (fn [_]
+               (let [r (await (select-all-notes))
+                     r' (move-notes-to-section-id-key r)]
+                 (log-crashlytics (str "dispatching ::update-notes with " (count r') " notes "))
+                 (rd/dispatch [::update-notes r']))))
+
+  (rd/reg-event-db ::set-deleted-file (fn [db [_ id]]
+                                        (assoc db :just-deleted id)))
+
+  (rd/reg-sub ::get-deleted-file (fn [db]
+                                   (:just-deleted db)))
+
+  (rd/reg-fx ::upload-note-fx
+             (fn [{:keys [note update-updated-at? password]}]
+               (cond
+                 (:encrypted note) (encrypt-and-upload-note note password)
+                 note (let [db FirebaseFirestore.instance
+                            fdb (fdb/FirestoreDB)
+                             
+                            reminders (note-reminders note)
+                            ref (.doc (.collection db "notes2")
+                                      (:id note))
+                            valid-status (valid-note? note)]
+                        (.set ref
+                                (w/stringify-keys
+                                 (if update-updated-at?
+                                   (assoc note
+                                          :updated_at (FieldValue.serverTimestamp))
+                                   note)))
+                        
+                        (when (not= true valid-status)
+                          (dutils/invalidNoteError note (str valid-status)))
+
+                        (when reminders
+                          (.uploadReminders fdb (:owner note) reminders)))
+                 :else nil)))
+
+  (rd/reg-event-fx ::upload-note
+                   (fn [{:keys [db]} [_ [note update-updated-at?]]]
+                     {:db db
+                      ::upload-note-fx {:note note
+                                        :update-updated-at? update-updated-at?
+                                        :password (:password db)}}))
+
+  (rd/reg-fx ::smart-sort-list-fx
+             (fn [{:keys [content section-name]}]
+               (let [new-content (await (smart-sort-list content))]
+                 (when (and new-content
+                            (= (count new-content)
+                               (count content)))
+                   (rd/dispatch [::update-current-note
+                                 (fn [m]
+                                   (assoc-in m
+                                             [:sections section-name "content"] new-content))])))))
+
+  (rd/reg-event-fx ::smart-sort-list
+                   (fn [{:keys [db]} [_ section-name]]
+                     {:db db
+                      ::smart-sort-list-fx
+                      {:content (get-in
+                                 db
+                                 [:current-note :sections section-name "content"])
+                       :section-name section-name}}))
+
+  (rd/reg-event-fx ::update-current-note
+                   (fn [{:keys [db]} [_ f]]
+                     (let [old-note (:current-note db)
+                           newnote (f old-note)
+                           newnote' (dissoc newnote :just-cloned)]
+
+                       (if (not= newnote (:current-note db))
+                         {:db (-> db
+                                  (assoc :current-note newnote')
+                                  (update
+                                   :undo #(conj (take 10 %) ;;Max undo steps
+                                                old-note)))
+                          ::upload-note-fx {:note newnote'
+                                            :update-updated-at? true
+                                            :password (:password db)}}
+
+                         {:db db}))))
+
+  (rd/reg-event-fx ::set-current-note-local
+                   (fn [{:keys [db]} [_ note]]
+                     {:db (assoc db :current-note note)}))
+
+  (rd/reg-event-db ::set-new-plaintext
+                   (fn [db [_ text]]
+                     (assoc db :override-plaintext text)))
+
+  (rd/reg-fx ::set-new-plaintext-fx (fn [plaintext]
+                                      (rd/dispatch [::set-new-plaintext plaintext])))
+
+  (rd/reg-fx ::set-new-title-fx (fn [title]
+                                  (rd/dispatch [::set-key :override-title (str title)])))
+
+  (rd/reg-sub ::get-new-plaintext
+              (fn [db _]
+                (:override-plaintext db)))
+
+  (rd/reg-sub ::get-new-title
+              (fn [db _]
+                (:override-title db)))
+
+  (rd/reg-fx ::log (fn [s]
+                     (println s)))
+
+  (rd/reg-sub ::current-note
+              (fn [{:keys [current-note]} _]
+                current-note))
+
+  (rd/reg-sub ::start-recording?
+              (fn [db _]
+                (:start-recording? db)))
+
+  (rd/reg-event-db ::set-key
+                   (fn [db [_ key value]]
+                     (assoc db key value)))
+
+  (rd/reg-event-db ::update-key-by-fn
+                   (fn [db [_ key f]]
+                     (update db key f)))
+
+  (rd/reg-sub ::watch-note-sorting
+              (fn [db _]
+                ;;Either :created_at or nil
+                ;;nil -> :updated_at
+                (:note-sorting db)))
+
+  (rd/reg-sub ::watch-view-archive
+              (fn [db _]
+                (:view-archive db)))
+
+  (rd/reg-sub ::fullscreen?
+              (fn [db _]
+                {:fullscreen  (:fullscreen? db)
+                 :currnoteid  (:current-note-id db)}))
+
+  (rd/reg-event-fx ::save-note (fn [{:keys [db]} [_ {:keys [note update-created-at?]}]]
+                                 (let [id->index (:id->saved-notes-index db)
+                                       saved-notes (:notes db)
+                                       index (when id->index
+                                               (id->index (:id note)))
+                                       saved-note (when index
+                                                    (nth saved-notes index))]
+
+                                   (if  (and (or (seq (:sections note))
+                                                 (not (string/blank? (:plaintext note)))
+                                                 (not (string/blank? (:title note))))
+                                             (not= saved-note note))
+                                     {:db db
+                                      ::insert-note [note
+                                                     update-created-at?
+                                                     (:just-deleted db)]}
+                                     {:db db}))))
+  (rd/reg-event-db
+   ::set-current-note-id
+   (fn [db [_ id]]
+
+     (if id
+       (assoc db :current-note-id id)
+       (let [base (-> db ;;In this case the user has just left the edit screen and we should clean up.
+                      (assoc :current-note-id nil)
+                      (dissoc :undo)
+                      (assoc :list-focus nil)
+                      (assoc :restructure? nil))]
+         base))))
+
+  (rd/reg-sub ::current-note-id
+              (fn [{:keys [current-note-id]} _]
+                current-note-id))
+
+  (rd/reg-sub ::last-saved-note
+              (fn [{:keys [last-saved-note]} _]
+                last-saved-note))
+
+  (rd/reg-fx ::insert-note
+             (fn [[note update-created-at? just-deleted-id]]
+               (when  (not= just-deleted-id (:id note))
+                 (let [{user-id :user-id
+                        email :email} (current-user)
+                       fdb (fdb/FirestoreDB)
+                       cr? (if (nil? update-created-at?) true update-created-at?) ;;Get rid of nil
+                       reminders (note-reminders note)]
+
+                   (await (.insertNote fdb
+                                       (w/stringify-keys
+                                        (update note
+                                                :roles
+                                                #(or % {user-id "owner"})))
+                                       user-id
+                                       (:id note)
+                                       email
+                                       .updateUpdatedAt cr?))
+
+                   (when reminders
+                     (.uploadReminders fdb user-id reminders))
+                   (rd/dispatch [::refresh-notes])))))
+
+  (rd/reg-event-db
+   ::update-notes
+   (fn [db [_ notes]]
+     (assoc db :notes notes)))
+
+  (rd/reg-sub ::get-notes
+              (fn [db _]
+                (:notes db)))
+
+  (rd/reg-flow
+   {:id :table-completion
+    :inputs {:notes [:notes]}
+    :path [:table-completion]
+    :output
+    (fn [{:keys [notes]}]
+      (table-completion notes))})
+
+  (rd/reg-sub ::table-completion
+              (fn [db _]
+                (:table-completion db)))
+
+  (rd/reg-flow
+   {:id
+    :current-sections
+    :inputs {:current-note [:current-note]}
+    :output
+    (fn [{:keys [current-note]}]
+      (:sections current-note))
+    :path [:current-sections]})
+
+  (rd/reg-sub ::current-sections (fn [db _] (:current-sections db)))
+
+  (rd/reg-flow
+   {:id
+    :current-sorted-section-names-and-type
+    :inputs {:current-note [:current-note]}
+    :output
+    (fn [{:keys [current-note]}]
+      (sort-by (fn [[_ {:strs [section-position]}]]
+                 section-position)
+               (:sections current-note)))
+    :path [:current-sorted-section-names-and-type-sections]})
+
+  (rd/reg-sub ::current-sorted-sections (fn [db _] (:current-sorted-section-names-and-type-sections db)))
+
+  (rd/reg-flow
+   {:id :id->saved-notes-index ;;Use for constant time lookup of a saved note by id.
+    :inputs {:notes [:notes]}
+    :path [:id->saved-notes-index]
+    :output
+    (fn [{:keys [notes]}]
+      (into {} (map-indexed (fn [i n] [(:id n) i]) notes)))})
+
+  (rd/reg-sub ::id->saved-notes-index (fn [db _] (:id->saved-notes-index db)))
+
+  (rd/reg-flow
+   {:id :list-completion
+    :inputs {:notes [:notes]}
+    :output
+    (fn [{:keys [notes]}]
+      (list-completion notes))
+    :path [:list-completion]})
+
+  (rd/reg-sub ::recently-added-section (fn [db _]
+                                         (:recently-added-section db)))
+
+  (rd/reg-sub ::list-completion (fn [db _] (:list-completion db)))
+
+  (defn intersecting-tags
+    "Returns a map from tag -> tags that occur in any note alongside it.
+  The mapping always includes itself, because we always want to show any currently selected tags."
+    [notes]
+    (reduce
+     (fn [tag->related-tags {:keys [archived tags]}]
+       (if archived
+         tag->related-tags
+         (let [tag-set (set tags)]
+           (reduce
+            (fn [tag->related-tags tag]
+              (update tag->related-tags tag
+                      #(into (or % #{}) tag-set)))
+            tag->related-tags
+            tags))))
+     {}
+     notes))
+
+  (rd/reg-flow
+   {:id :all-tags
+    :inputs {:notes [:notes]
+             :pinned-tags [:pinned-tags]}
+    :path [:all-tags]
+    :output
+    (fn [{:keys [notes pinned-tags]}]
+      {:all-tags
+
+       (distinct (concat pinned-tags
+                         (filter some?
+                                 (flatten
+                                  (keep (fn [{:keys [archived tags]}]
+                                          (when (not archived)
+                                            tags)) notes)))))
+       :intersecting-tags (intersecting-tags notes)})})
+
+  (rd/reg-sub
+   ::all-tags-sub
+   (fn [db _]
+     (:all-tags db)))
+
+
+  (rd/reg-event-db ::set-home-screen-widget-data
+                   (fn [db [_ {:keys [note-id section-id] :as m}]]
+                     (assoc db :home-screen-widget-data m)))
+
+  (rd/reg-fx ::load-home-screen-widget-data-fx
+             (fn [_]
+               (let [prefs (await (sp/SharedPreferences.getInstance))
+                     stored-note-id (await (.getString prefs "note-id"))
+                     stored-section-id (await (.getString prefs "section-id"))]
+                 (rd/dispatch [::set-home-screen-widget-data {:note-id stored-note-id
+                                                              :section-id stored-section-id}]))))
+
+  (rd/reg-event-fx ::load-home-screen-widget-data
+                   (fn [{:keys [db]} _]
+                     {:db db
+                      ::load-home-screen-widget-data-fx []}))
+
+  (rd/reg-fx ::save-list-widget
+             (fn [{:keys [section stored-section-id stored-note-id color]}]
+               (when
+                (and (not kIsWeb)
+                     Platform.isAndroid)
+                 (when (and stored-note-id
+                            stored-section-id
+                            (= stored-section-id (section "id")))
+                   (await (HomeWidget.saveWidgetData
+                           "todo_list"
+                           (c/jsonEncode
+                            (assoc
+                             section :color color))))
+
+                   (await (HomeWidget.updateWidget
+                           .androidName "NoteWidgetReceiver"))))))
+
+  (rd/reg-event-fx ::save-list-widget?
+                   (fn [{:keys [db]} [_ {:keys [section-id] :as m}]]
+                     (let [section (get-in db [:current-note :sections section-id])]
+                       {:db db
+                        ::save-list-widget
+                        {:section section
+                         :color (get-in db [:user-options "preferences" "android-widget-bg-color"])
+                         :stored-section-id (get-in db [:home-screen-widget-data :section-id])
+                         :stored-note-id (get-in db [:home-screen-widget-data :note-id])}}))))
+
+

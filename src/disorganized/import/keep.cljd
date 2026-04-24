@@ -1,0 +1,200 @@
+(ns disorganized.import.keep
+  (:require [cljd.flutter :as f]
+            [disorganized.ui.theme :as theme]
+            [cljd.dart.isolates :as di]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            [clojure.walk :as w]
+            ["package:disorganized_notes/firestore_db.dart" :as fdb]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+            [cljd.reader :as reader]
+            ["package:path_provider/path_provider.dart" :refer [getApplicationDocumentsDirectory]]
+            
+            [clojure.string :as string]
+            ["dart:convert" :as c]
+            [disorganized.model :as model]
+            ["package:flutter/material.dart" :as m]
+            [hti.re-dash.alpha :as rd]
+            ["package:file_picker/file_picker.dart" :refer [FilePicker]]
+            ["dart:io" :refer [File Directory]]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+            ["package:flutter_archive/flutter_archive.dart" :refer [ZipFile]]
+            ["package:archive/archive_io.dart" :refer [ArchiveFile ZipFileEncoder ZipDecoder InputFileStream]]))
+
+(defn extension2 [s]
+  (-> s
+      (clojure.string/split #"/")
+      last
+      (clojure.string/split #"\.")
+      last))
+
+(defn pick-keep-file []
+  (when-let [result (await (FilePicker.platform.pickFiles
+                            .allowMultiple false))]
+    (if kIsWeb
+      (let [bytes (-> result .-files .-first .-bytes)
+            name (-> result .-files .-first .-name)]
+        (.decodeBytes (ZipDecoder) bytes))
+
+      (let [archive (File (first (into [] (.map (.paths result)
+                                                (fn [p] p)))))]
+        archive))))
+
+(defn ?assoc
+  "Same as assoc, but skip the assoc if v is nil"
+  [m & kvs]
+  (->> kvs
+       (partition 2)
+       (filter second)
+       (map vec)
+       (into m)))
+
+(defn find-file [filename all-files]
+  (println "find file" filename all-files)
+  (println "found file " (first (filter #(= filename (last (string/split (.-path %) #"/"))) all-files)))
+
+  (first (filter #(= filename (last (string/split (.-path %) #"/"))) all-files)))
+
+(defn sections [json all-files scaffold-messenger]
+  (cond
+    (json "listContent") (let [listc (map (fn [{:strs [text isChecked]}]
+                                            {"id" (str (random-uuid))
+                                             "children" []
+                                             "checkbox" (boolean isChecked)
+                                             "data" (str text)})
+                                          (json "listContent"))
+                               section-map (model/default-section-map "list" 0 "list")]
+                           {(section-map "id") (assoc section-map "content" listc)})
+
+    (json "attachments") (let [paths (mapv #(% "filePath") (json "attachments"))
+                               ids (mapv (fn [_] (str (random-uuid))) paths)]
+
+                           (into {}
+                                 (await (Future.wait
+                                         (mapv (fn [[p folder-id]]
+                                                 (let [filepath (find-file p all-files)
+                                                       ext (extension2 (.-path filepath))
+                                                       _ (println "Extension " ext)
+                                                       file (.readAsBytesSync filepath)
+                                                       storage-ref (FirebaseStorage.instance.ref)
+                                                       folder-ref (.child storage-ref
+                                                                          (str "/media/"
+                                                                               (model/uid)
+                                                                               "/"
+                                                                               folder-id
+                                                                               "/"
+                                                                               p))]
+                                                   (println "folder ref " folder-ref)
+                                                   (await (.putData folder-ref file))
+                                                   (println "uploaded image ")
+
+                                                   (let [section-map (model/default-section-map "media" 0 "media")]
+                                                     [(section-map "id")
+                                                      (assoc section-map "content"
+                                                             {"id" folder-id
+                                                              "type" (if (= "3gp" ext)
+                                                                       "other"
+                                                                       "images")})])))
+                                               (map vector paths ids))))))))
+
+(defn import-json [file all-files scaffold-messenger]
+  (let [json (model/dart->clj-ds (c/jsonDecode (await (.readAsString file))))
+        default-note (model/init-new-note)
+        note (-> default-note
+                 (?assoc
+                  :plaintext (str (json "title")
+                                  "\n"
+                                  (json "textContent"))
+
+                  :pin (when (json "isPinned")
+                         (.now DateTime))
+
+                  :tags (when-let [ls (json "labels")]
+                          (mapv #(% "name") ls))
+                  
+                  :imported true
+
+                  :sections (await (sections json all-files scaffold-messenger))
+
+                  :created_at (DateTime.fromMicrosecondsSinceEpoch
+                               (json "createdTimestampUsec"))
+
+                  :updated_at (DateTime.fromMicrosecondsSinceEpoch
+                               (json "userEditedTimestampUsec"))))]
+
+    (await (model/import-note note))))
+
+(defn run-keep-import [archive scaffold-messenger]
+  (let [tempdir (await (getApplicationDocumentsDirectory))
+        export-dir (Directory (str (.-path tempdir) "/keep-export"))
+        _ (await (.create export-dir))
+        _ (await (.extractToDirectory ZipFile .zipFile archive .destinationDir export-dir))
+        all-files (.listSync (Directory (str (.-path export-dir) "/Takeout/Keep")))]
+
+    ;;doseq doesn't "retain the head" which prevents out of memory errors when importing
+    ;;an archive with many images in it.
+    (doseq [file  all-files
+            :let [extension (last (string/split (.-path file) #"\."))]]
+      (when (= "json" extension)
+        (await (import-json file all-files scaffold-messenger))))))
+
+(defn google-keep []
+  (f/widget
+   :watch [archive (rd/subscribe [::model/archive])]
+   :get [m/ScaffoldMessenger]
+   (m/OutlinedButton
+    .onPressed
+    (fn []
+      (if archive
+        (await (run-keep-import archive scaffold-messenger))
+        (await (pick-keep-file)))
+      nil)
+    .child (m/Text "click me"))))
+
+(defn google-keep-popup [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Import from Google Keep"
+               .style (.-titleMedium tthm))
+       (m/Text "First, export your notes by using Google Takeout.
+Only select Keep for export. You will receive an email with a link to download your notes.")
+       (m/SizedBox .height 10)
+       (m/ElevatedButton
+        .child (m/Text "Open Google Takout")
+        .onPressed
+        (fn []
+          (url/launch "https://takeout.google.com/")
+          nil))
+       (m/SizedBox .height 10)
+
+       (m/Text
+        "Save the zip file to your Android or iOS device (web not supported).
+Then, click the button below to import your data. Voice recordings will be uploaded as media files.")
+
+       (m/SizedBox .height 10)
+       (m/ElevatedButton
+        .child (m/Text "Import Keep notes")
+        .onPressed
+        (fn []
+
+          (let [archive (await (pick-keep-file))]
+            (when archive
+              (.pop navigator)
+              (model/snackbar scaffold-messenger "Running import, you will receive a message when import is finished.")
+              (await (run-keep-import archive scaffold-messenger))
+              (rd/dispatch [::model/refresh-notes])
+              (model/snackbar scaffold-messenger "Import finished")))
+          nil))])
+
+     .actions [(m/TextButton
+                .child (m/Text "Cancel")
+                .onPressed (fn []
+                             (.pop navigator)))]))))

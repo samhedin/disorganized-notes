@@ -1,0 +1,646 @@
+(ns disorganized.ui.table
+  (:require
+   ["package:flutter/material.dart" :as m]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   ["package:intl/intl.dart" :as intl :refer [NumberFormat]]
+   ["dart:math" :refer [pi]]
+   [cljd.flutter :as f]
+   [clojure.set :refer [rename-keys]]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [disorganized.model :as utils]
+   [hti.re-dash.alpha :as rd]))
+
+(def number-format (NumberFormat "#.##"))
+
+(defn drop-nth [n coll]
+  (into [] (concat
+            (take n coll)
+            (drop (inc n) coll))))
+
+(defn add-row [section-id columns]
+  (model/unfocus-then-run
+   (rd/dispatch [::model/update-current-note
+                 (fn [m]
+                   (update-in m [:sections section-id "content"]
+                              (fn [content]
+                                (conj (into [] content)
+                                      {"data" (into {}
+                                                    (map (fn [c] [c ""]) columns))
+                                       "id" (str (random-uuid))}))))])))
+
+(defn brightness [^m/ThemeData theme]
+  (if (= m/Brightness.dark
+         (.-brightness theme))
+    m/Colors.white
+    m/Colors.black))
+
+(defn completion-string [options completion-index columns]
+  (let [row (nth options completion-index)]
+    (string/join "; " (map row columns))))
+
+(defn rearrange-table-row [section-id i {:strs [data]} columns]
+  (m/ReorderableDragStartListener
+   .index i
+   .child (m/ListTile
+           .leading (m/IconButton
+                     .icon (m/Icon m/Icons.clear)
+                     .onPressed (fn []
+                                  
+                                  (rd/dispatch [::model/update-current-note (fn [m]
+                                                                              (update-in m [:sections section-id "content"] #(drop-nth i %)))])
+                                  nil))
+           .title (m/Text (str (string/join ", " (map #(data %) columns)))
+                          .overflow m/TextOverflow.ellipsis)
+           .trailing (m/Icon m/Icons.drag_handle))))
+
+(defn table-row [section-id columns i {:strs [id data]} rows rearrange? row-errors?]
+  (m/DataRow
+   .key (m/ValueKey (str id columns))
+   .cells
+   (for [[pos col] (map-indexed vector columns)]
+     (m/DataCell
+      (f/widget
+       :get {{tthm .-textTheme} m/Theme}
+       :key (str id "widget")
+       :watch [autocomplete-visible? (atom false) :as *visible?]
+       (m/ConstrainedBox
+        .constraints (m/BoxConstraints
+                      .minWidth (if autocomplete-visible? 250 0)))
+       (if rearrange?
+         (if (= 0 pos)
+           (m/TextButton
+            .onPressed (fn []
+                         
+                         (rd/dispatch [::model/update-current-note (fn [m]
+                                                                     (update-in m [:sections section-id "content"] #(drop-nth i %)))])
+                         nil)
+            .child (m/Row .children [(m/Icon m/Icons.clear)
+                                     (m/Text (or (data col) ""))]))
+           (m/Text (or (data col) "")))
+         (f/widget
+          :watch [completion (rd/subscribe [::model/table-completion])]
+          (m/RawAutocomplete
+           .optionsViewOpenDirection m/OptionsViewOpenDirection.up
+           .optionsBuilder (fn [^m/TextEditingValue {:flds [text]}]
+                             (let [^#/(Iterable Map) result []]
+                                 result))
+
+           .optionsViewBuilder (fn [ctx on-selected options]
+                                 (f/widget
+                                  :watch [height-factor (atom 0.0) :as *height-factor]
+                                  :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                                               (fn [_]
+                                                 (reset! *height-factor 1.0)
+                                                 (reset! *visible? true)))
+                                            :dispose nil]
+
+                                  :animate [height-factor height-factor
+                                            :duration (Duration .milliseconds 150)
+                                            :curve m/Curves.ease]
+
+                                  m/Material
+
+                                  (m/ConstrainedBox
+                                   .constraints (m/BoxConstraints .maxWidth 400
+                                                                  .maxHeight 300))
+                                  (m/TapRegion
+                                   .onTapOutside (fn [_]
+                                                   (reset! *visible? false)))
+
+                                  m/Card
+                                  (m/ListView.builder
+                                   .shrinkWrap true
+                                   .itemCount (count options)
+                                   .itemBuilder
+                                   (fn [_ completion-index]
+                                     (m/TextButton
+                                      .child
+                                      (m/Align
+                                       .alignment m/Alignment.centerLeft
+                                       .heightFactor height-factor
+                                       .child
+                                       (m/Text
+                                        (completion-string options completion-index columns)
+                                        .maxLines 1
+                                        .overflow m/TextOverflow.ellipsis))
+                                      .onPressed (fn []
+                                                   (rd/dispatch
+                                                    [::model/update-current-note
+                                                     (fn [m]
+                                                       (assoc-in
+                                                        m [:sections section-id "content" i "data"] (nth options completion-index)))])
+                                                   (on-selected (nth options completion-index))))))))
+
+           .displayStringForOption (fn [opt]
+                                     (str opt))
+
+           .fieldViewBuilder (fn [ctx ^m/TextEditingController tc ^m/FocusNode focus-node on-submit]
+                               (f/widget
+                                :let [save (fn []
+                                             (rd/dispatch [::model/update-current-note
+                                                           (fn [m]
+                                                             (assoc-in m [:sections section-id "content" i "data" col] (.-text tc)))]))
+                                      count-lines (fn [text]
+                                                    (count (string/split (or text "") #"\n")))]
+
+                                :bg-watcher ([focused? focus-node :> .-hasFocus]
+                                             (when (not focused?)
+                                               (save)))
+
+                                :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                                             (fn [_]
+                                               (.-text! tc (str (data col)))))
+                                          :dispose nil]
+
+                                :watch [lines (atom
+                                               (count-lines (data col))) :as *lines]
+                                :let [error? (and row-errors?
+                                                  (= (row-errors? id) col))]
+
+                                ;;This heigh resizes to fit multiline rows without scrolling... at least on tested devices.
+                                :height (if (= 1 lines) 48
+                                            (* 31 lines))
+                                (m/ConstrainedBox
+                                 .constraints (m/BoxConstraints .minWidth 50))
+                                (m/TextField
+                                 .style (m/TextStyle .color (if error? m/Colors.red
+                                                                (.-color (.-titleLarge tthm))))
+                                 .maxLines nil
+                                 .keyboardType m/TextInputType.multiline
+                                 .controller tc
+                                 .onChanged (fn [text]
+                                              (let [c (count-lines text)]
+                                                (when (not= c lines)
+                                                  (reset! *lines c))))
+                                 .onTapOutside (fn [_] (save))
+                                 .focusNode focus-node
+                                 .decoration (m/InputDecoration
+                                              .border m/InputBorder.none))))))))))))
+
+(defn letter [n]
+  (when (<= 1 n 26)
+    (str (char (+ 64 n)))))
+
+(defn gen-column [section-id  ^m/ScaffoldMessengerState scaffold-messenger]
+  (rd/dispatch
+   [::model/update-current-note
+    (fn [m]
+      (update-in m [:sections section-id "columns"]
+                 (fn [c]
+                   (if (> (count c) 20)
+                     (do (.showSnackBar scaffold-messenger
+                                        (m/SnackBar
+                                         .content (m/Text "Max number of columns reached")))
+                         c)
+                     (conj c (letter (inc (count c))))))))]))
+
+(defn rename-column? [section-id ^m/TextEditingController tc old-name invalid? *invalid?]
+  (if invalid?
+    (do (reset! *invalid? nil)
+        (.-text! tc old-name))
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+
+        (let [newname (string/trim (.-text tc))]
+          (if (or (= newname old-name) invalid? (string/blank? newname))
+            (do ;;Sometimes the invalid? var returns to nil before this is run so extra check here.
+              (reset! *invalid? nil)
+              (.-text! tc old-name)
+              m)
+            (let [m1
+                  (update-in m [:sections
+                                section-id
+                                "columns"]
+                             (fn [names]
+                               (mapv #(if (= old-name %) newname %) names)))]
+
+              (update-in m1 [:sections section-id "content"]
+                         (fn [rows]
+                           (mapv (fn [row]
+                                   (update row "data" #(rename-keys % {old-name newname}))) rows)))))))])))
+
+(defn drop-column [name section-id current-note  ^m/ScaffoldMessengerState scaffold-messenger]
+  (println "drop-column")
+  ;;There must be at least one column in the table otherwise flutter crashes.
+  (when (< 1 (count (get-in current-note [:sections
+                                          section-id
+                                          "columns"])))
+    (let [m1 (update-in current-note [:sections
+                                      section-id
+                                      "columns"]
+                        (fn [names]
+                          (into [] (filter #(not= name %) names))))]
+
+      (update-in m1 [:sections section-id "content"]
+                 (fn [rows] (mapv #(dissoc % name) rows))))))
+
+(defn column-input-decoration [invalid  section-id column-name ctx ^m/ScaffoldMessengerState  ^m/ScaffoldMessengerState scaffold-messenger]
+  (if invalid
+    (m/InputDecoration
+     .errorText invalid
+     .border (m/UnderlineInputBorder .borderSide (m/BorderSide .color m/Colors.red)))
+    (m/InputDecoration
+     .border m/InputBorder.none)))
+
+(defn column [column-name section-id last-column?]
+  (m/DataColumn
+   .label
+   (f/widget
+    :key (str section-id column-name "regular")
+
+    :context ctx
+    :watch [invalid (atom nil) :as *invalid
+            rearrange? (rd/subscribe [::model/get-restructure-mode section-id])]
+    :managed [tc (m/TextEditingController .text column-name)
+              focus-node (m/FocusNode)]
+    :get [m/ScaffoldMessenger]
+    :bg-watcher ([focused focus-node :> .-hasFocus]
+                 (if focused
+                   (.-selection! tc (m/TextSelection
+                                     .baseOffset 0
+                                     .extentOffset (count (.-text tc))))
+                   (rename-column? section-id tc column-name invalid *invalid)))
+    (if rearrange?
+      (m/Row
+       .children [(m/Text column-name
+                          .style (m/TextStyle .fontWeight m/FontWeight.bold))
+                  (m/IconButton
+                   .icon (m/Icon m/Icons.clear)
+                   .onPressed (fn []
+                                (println "hello?")
+                                (let [*note (atom nil)]
+                                  
+                                  (rd/dispatch [::model/update-current-note
+                                                (fn [m]
+                                                  (if-let [new
+                                                           (drop-column column-name section-id m scaffold-messenger)]
+                                                    (do
+                                                      (reset! *note m)
+                                                      new)
+                                                    (do
+                                                      (.showSnackBar scaffold-messenger
+                                                                     (m/SnackBar
+                                                                      .content (m/Text "A table must have at least one column. Delete table via section name.")))
+                                                      m)))])
+
+                                  (println "NOTE " @*note)
+                                  (when @*note
+                                    (.showSnackBar
+                                     scaffold-messenger
+                                     (m/SnackBar
+                                      .content (m/Text "Column deleted.")
+                                      .action
+                                      (m/SnackBarAction
+                                       .label "Undo"
+                                       .onPressed
+                                       (fn []
+                                         (rd/dispatch [::model/update-current-note
+                                                       (fn [_]
+                                                         @*note)])
+                                         nil)))))
+                                  nil)))])
+      (m/Expanded
+       .child
+       (m/ConstrainedBox
+        .constraints (m/BoxConstraints .minWidth 40)
+        .child
+        (m/TextField .controller tc
+                     .focusNode focus-node
+                     .textCapitalization m/TextCapitalization.sentences
+                     .onSubmitted (fn [_]
+                                    (rename-column? section-id tc column-name invalid *invalid)
+                                    nil)
+
+                     .onTapOutside (fn [_]
+                                     (rename-column? section-id tc column-name invalid *invalid)
+                                     nil)
+
+                     .onChanged (fn [text]
+                                          ;;This doesn't update the current note, it just uses the call to set a valid/invalid edit flag.
+                                  (rd/dispatch [::model/update-current-note
+                                                (fn [m]
+                                                  (let [existing-cols
+                                                        (into #{} (get-in m [:sections section-id "columns"]))]
+                                                    (reset! *invalid
+                                                            (cond
+                                                              (= text column-name) nil ;;Meaning this is fine.
+                                                              (existing-cols text) "Exists!"
+                                                              (string/blank? text) "Empty!"))
+                                                    m))]))
+                     .style (m/TextStyle .fontWeight m/FontWeight.bold)
+                     .decoration (column-input-decoration invalid section-id column-name ctx scaffold-messenger))))))))
+
+(defn- rearrange-table [section-id  ^m/ScaffoldMessengerState scaffold-messenger columns rows]
+  [(m/Container
+    .height 40
+    .child (m/ReorderableListView.builder
+            .buildDefaultDragHandles false
+            .scrollDirection m/Axis.horizontal
+            .shrinkWrap true
+            .itemCount (count columns)
+            .onReorder (fn [old new]
+                         (rd/dispatch [::model/update-current-note
+                                       (fn [m]
+                                         (update-in m [:sections section-id "columns"]
+                                                    #(utils/vec-move % old
+                                                                     (if (< old new)
+                                                                       (dec new)
+                                                                       new))))]))
+            .itemBuilder (fn [_ index]
+                           (f/widget
+                            :let [c (columns index)]
+                            :key c
+                            :context ctx
+                            (m/Row
+                             .children
+                             [(m/SizedBox
+                               .width 5)
+                              (m/IconButton
+                               .icon (m/Icon m/Icons.clear)
+
+                               .onPressed (fn []
+                                            (popup/confirm
+                                             ctx
+                                             "Really delete column?"
+                                             (fn []
+                                               
+                                               (rd/dispatch
+                                                [::model/update-current-note
+                                                 (fn [m]
+                                                   (if-let [new
+                                                            (drop-column c section-id m scaffold-messenger)]
+                                                     new
+                                                     (do
+                                                       (.showSnackBar scaffold-messenger
+                                                                      (m/SnackBar
+                                                                       .content (m/Text "A table must have at least one column. Delete table via section name.")))
+                                                       m)))])))))
+
+                              (f/widget
+                               :get {{tthm .-textTheme} m/Theme}
+                               (m/Text c
+                                       .style
+                                       (.-titleMedium tthm)))
+                              (m/ReorderableDragStartListener
+                               .index index
+                               .child (m/Transform.rotate
+                                       .angle (/ pi 2) ;;I REMEMBERED SOMETHING FROM MATH CLASS
+                                       .child (m/Icon m/Icons.drag_handle)))])))))
+   (m/SizedBox .height 5)
+   (m/ReorderableListView.builder
+    .physics (m/NeverScrollableScrollPhysics)
+    .shrinkWrap true
+    .itemCount (count rows)
+    .onReorder (fn [old new]
+                 (rd/dispatch [::model/update-current-note
+                               (fn [m]
+                                 (update-in m [:sections section-id "content"]
+                                            #(utils/vec-move % old
+                                                             (if (< old new)
+                                                               (dec new)
+                                                               new))))]))
+    .itemBuilder (fn [_ index]
+                   (f/widget
+                    :let [row (rows index)]
+                    :key (str row)
+                    (rearrange-table-row section-id index row columns))))
+
+   (m/SizedBox .height 5)
+
+   (f/widget
+    :get {{tthm .-textTheme} m/Theme}
+    :context ctx
+    (m/ElevatedButton.icon
+     .onPressed
+     (fn []
+       (let [column (await (popup/column-selector columns ctx))]
+         (popup/column-reduction-options ctx column section-id)
+         (rd/dispatch [::model/reset-restructure-mode])))
+     .label (m/Text "Calculate column(s)")
+     .icon (m/Icon m/Icons.calculate)))
+
+   (m/SizedBox .height 10)
+   (f/widget
+    :get {{tthm .-textTheme} m/Theme}
+    :padding {:left 20}
+    (m/Column
+     .crossAxisAlignment m/CrossAxisAlignment.start
+     .children
+     [(m/Align
+       .alignment m/Alignment.center
+       .child (m/Text "Instructions"
+                      .style (.-titleLarge tthm)))
+
+      (m/SizedBox .height 10)
+
+      (m/Row
+       .children
+       [(m/Icon m/Icons.drag_handle)
+        (m/SizedBox .width 5)
+        (m/Text "Reorder rows/sections.")])
+
+      (m/SizedBox .height 10)
+
+      (m/Row
+       .children
+       [(m/Transform.rotate
+         .angle (/ pi 2) ;;I REMEMBERED SOMETHING FROM MATH CLASS
+         .child (m/Icon m/Icons.drag_handle))
+        (m/SizedBox .width 5)
+        (m/Text "Reorder columns")])
+
+      (m/SizedBox .height 10)
+
+      (m/Row
+       .children
+       [(m/Icon m/Icons.clear)
+        (m/SizedBox .width 5)
+        (m/Text "Delete")])
+
+      (m/SizedBox .height 10)
+
+      (m/Row
+       .children
+       [(m/Icon m/Icons.calculate)
+        (m/SizedBox .width 5)
+        (m/Text "Column summarization")])]))])
+
+(defn calculation-row? [columns rows calculations section-id]
+  (when (seq calculations)
+    (let [result
+          (into {}
+                (for [c columns
+                      :let [[op zero icon]
+                            (case (calculations c)
+                              "sum" [+ 0 m/Icons.add]
+                              "multiply" [* 1 m/Icons.clear]
+                              nil [nil nil m/Icons.calculate])]]
+                  (when op
+                    [c (reduce (fn [acc r]
+                                 (let [result? (let [s (get-in r ["data" c])]
+                                                 (try
+                                                   (double.parse (or s "0"))
+                                                   (catch FormatException e
+                                                     nil)))]
+
+                                   (if result?
+                                     (update acc :v #(op result? %))
+                                     (update acc :error #(assoc % (r "id") c)))))
+                               {:v zero
+                                :error {}
+                                :icon icon}
+                               rows)])))
+
+          row-errors (apply merge
+                            (map (fn [[_ e]] (:error e)) result))
+
+          row
+          (m/DataRow
+           .key (m/ValueKey (str "calculation-row"))
+           .cells
+           (for [c columns
+                 :let [{v :v
+                        error :error
+                        icon :icon} (result c)]]
+             (if v
+               (m/DataCell
+                (f/widget
+                 :get {{tthm .-textTheme} m/Theme}
+                 :context ctx
+
+                 (m/TextButton.icon
+                  .icon (m/Icon icon)
+                  .label (m/Text (str (.format number-format v))
+                                 .style (m/TextStyle .fontStyle m/FontStyle.italic))
+                  .onPressed (fn []
+                               (popup/column-reduction-options ctx c section-id)
+                               (rd/dispatch [::model/reset-restructure-mode])))))
+
+               (m/DataCell
+                (f/widget
+                 :get {{tthm .-textTheme} m/Theme}
+                 :context ctx
+                 (m/TextButton.icon
+                  .icon (m/Icon m/Icons.minimize)
+                  .label (m/Text "")
+                  .onPressed (fn []
+                               (popup/column-reduction-options ctx c section-id)
+                               (rd/dispatch [::model/reset-restructure-mode]))))))))]
+      {:row row
+       :errors row-errors})))
+
+(defn show
+  [section-id]
+  (f/widget
+   :watch [{{:strs [content columns calculations]} section-id} (rd/subscribe [::model/current-sections])
+           rearrange? (rd/subscribe [::model/get-restructure-mode section-id])]
+   :let [rows content]
+   :key (str  section-id)
+
+   :get [m/Theme m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+
+   :managed [scroll (m/ScrollController)]
+   (m/LayoutBuilder
+    .builder
+    (fn [ctx constraints]
+      (if rearrange?
+        (m/Column
+         .children
+         (rearrange-table section-id scaffold-messenger columns rows))
+
+        (m/Column
+         .children
+         [(m/Align
+           .alignment m/Alignment.center
+           .child (m/Scrollbar
+                   ;;.thumbVisibility true
+                   .controller scroll
+                   .interactive true
+                   .trackVisibility true
+                   .child
+                   (m/SingleChildScrollView
+                    .scrollDirection m/Axis.horizontal
+                    .controller scroll
+                    .child
+                    (m/ConstrainedBox
+                     .constraints (m/BoxConstraints
+                                   .minWidth (min 500 (.-maxWidth constraints)))
+                     .child (m/DataTable
+                             .key (m/ValueKey section-id)
+                             .dataRowMaxHeight double.infinity
+                             .border  (m/TableBorder.symmetric
+                                       .outside (m/BorderSide.none)
+                                       .inside (m/BorderSide .width 0.15
+                                                             .style m/BorderStyle.solid
+                                                             .color (brightness theme)))
+                             .dividerThickness 0.0000001 ;;Can't be zero but this makes it go away
+                             .columnSpacing 10
+                             .horizontalMargin 5
+                             ;;.showCheckboxColumn true
+                             .columns
+                             (map-indexed
+                              (fn [i n]
+                                (column n section-id
+                                        (= i (dec (count columns))))) columns)
+
+                             .rows  (let [calc? (calculation-row? columns rows calculations section-id)
+                                          table-rows
+                                          (into [] (map-indexed
+                                                    (fn [i row]
+                                                      (table-row section-id columns i row rows rearrange?  (:errors calc?)))
+                                                    rows))]
+                                      (if calc?
+                                        (conj table-rows (:row calc?))
+                                        table-rows)))))))
+          (m/SizedBox .height 10)
+          (m/Visibility
+           .visible (not rearrange?)
+           .child
+           (f/widget
+            :let [button-width 138]
+
+            (m/Row
+             .mainAxisAlignment m/MainAxisAlignment.center
+
+             .children
+             [(m/Flexible
+               .child
+               (f/widget
+                :get [m/ScaffoldMessenger]
+                :get {{tthm .-textTheme} m/Theme}
+                (m/ConstrainedBox
+                 .constraints
+                 (m/BoxConstraints
+                  .maxWidth button-width
+                  .minWidth button-width))
+                (m/Tooltip
+                 .message "Add column to table"
+                 .child
+                 (m/ElevatedButton.icon
+                  .icon (m/Icon m/Icons.view_column)
+                  .label (m/Text "Add column"
+                                 .style (.-bodySmall tthm))
+                  .onPressed (fn []
+                               (gen-column section-id scaffold-messenger))))))
+              (m/SizedBox .width 10)
+              (m/Flexible
+               .child
+               (f/widget
+                :get {{tthm .-textTheme} m/Theme}
+                (m/ConstrainedBox
+                 .constraints
+                 (m/BoxConstraints
+                  .maxWidth button-width
+                  .minWidth button-width))
+                (m/Tooltip
+                 .message "Add row to table"
+                 .child (m/ElevatedButton.icon
+                         .icon (m/Icon m/Icons.table_rows)
+                         .label (m/Text "Add row"
+                                        .style (.-bodySmall tthm))
+                         .onPressed (fn []
+                                      (add-row section-id columns))))))])))]))))))

@@ -1,0 +1,305 @@
+(ns disorganized.ui.date
+  (:require ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+            ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
+            ["package:disorganized_notes/DateTimePicker.dart" :as dt]
+            [disorganized.model :as utils]
+            ["package:flutter/foundation.dart" :refer [kIsWeb]]
+            [disorganized.ui.popup :as popup]
+            [clojure.string :as string]
+            [disorganized.ui.theme :as theme]
+            [disorganized.model :as model]
+            [hti.re-dash.alpha :as rd]
+            ["package:disorganized_notes/DateFormatter.dart" :as df]
+            ["package:flutter/material.dart" :as m]
+            [cljd.flutter :as f]))
+
+(defn color->style [^m/Color? color? brightness]
+  (if color?
+    (.copyWith
+     (theme/text-button-style (if (= m/Brightness.dark brightness)
+                                "dark"
+                                "light"))
+     .foregroundColor (m/WidgetStateProperty.all color?))
+
+    (theme/text-button-style brightness)))
+
+(defn update-datetime [section-name ^m/DateTime date repeating ^m/ScaffoldMessengerState scaffold-messenger]
+  (rd/dispatch [::model/update-current-note
+                (fn [m]
+                  (update-in m
+                             [:sections section-name "content"]
+                             (fn [cont]
+                               (assoc (or cont {}) "datetime" (Timestamp.fromDate
+                                                               (.toUtc date))))))])
+  (popup/update-reminder section-name repeating scaffold-messenger nil nil))
+
+(defn showdate
+  [^m/DateTime date finished? passed? timeformat-24-hours? schedule]
+  ;;(println "date/showdate" date finished?)
+  (let [d (df/DateFormatter.getVerboseDateTimeRepresentation (.toLocal date)
+                                                             timeformat-24-hours?)]
+    (m/Text (if schedule
+              (str d ". " (string/capitalize (str schedule)))
+              d)
+            .style (cond
+                     finished?  (m/TextStyle
+                                 .fontSize 20
+
+                                 .decoration  (m/TextDecoration.lineThrough)
+                                 .decorationThickness 1.5)
+
+                     passed? (m/TextStyle
+                              .fontSize 20
+                              .decoration (m/TextDecoration.underline)
+                              .decorationThickness 1.5
+                              .color m/Colors.red
+                              .decorationColor m/Colors.red)
+
+                     :else (m/TextStyle
+                            .fontSize 20)))))
+
+(defn toolbar [content section-name]
+  (f/widget
+   :get [:timeformat-24-hours? m/ScaffoldMessenger]
+
+   :padding {:top 5}
+   :let [content (or content {})
+         ^Timestamp cdate (content "datetime")
+         current-date (if cdate
+                        (.toDate cdate)
+                        (DateTime.now))
+         finished? (or (content "finished") false)
+         passed? (.isAfter (DateTime.now) current-date)]
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.center
+    .children
+    [(showdate current-date finished? passed?  timeformat-24-hours?
+               (content "repeating"))
+     (m/SizedBox .height 10)
+     (m/Column
+      .children
+      [(m/Row
+        .mainAxisAlignment m/MainAxisAlignment.center
+        .children
+        [(m/TextButton
+          .onPressed (fn []
+                      (update-datetime
+                              section-name
+                              (.subtract current-date (Duration .hours 1))
+                              (content "repeating")
+                              scaffold-messenger) )
+          .child (m/Text "-1 h"))
+         (f/widget
+          :context ctx
+          :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+          :get [m/ScaffoldMessenger]
+          (m/OutlinedButton.icon
+           .onPressed (fn []
+                        (model/unfocus-then-run
+                         (when-let [time-of-day (await (m/showTimePicker
+                                                        .context ctx
+                                                        .initialEntryMode m/TimePickerEntryMode.dial
+                                                        .initialTime (m/TimeOfDay.fromDateTime current-date)))]
+
+                           (let [selected (when time-of-day
+                                            (DateTime
+                                             (.-year current-date)
+                                             (.-month current-date)
+                                             (.-day current-date)
+                                             (.-hour time-of-day)
+                                             (.-minute time-of-day)))]
+
+                             (cond
+                               (.isAfter
+                                (.add (DateTime.now)
+                                      (Duration .minutes 1))
+                                selected)
+                               (.showSnackBar scaffold-messenger
+                                              (m/SnackBar .content
+                                                          (m/Text "To get a notification, you need to be online and set a date at least 3 minutes into the future.")))
+
+                               kIsWeb (.showSnackBar scaffold-messenger
+                                                     (m/SnackBar .content
+                                                                 (m/Text "Notifications are not supported on the web client yet."))))
+
+                             (update-datetime
+                              section-name
+                              selected
+                              (content "repeating")
+                              scaffold-messenger))))
+                        nil)
+           .icon (m/Icon m/Icons.access_time)
+           .label (m/Text "Time")))
+         
+         (m/TextButton
+          .onPressed (fn []
+                       (update-datetime
+                        section-name
+                        (.add current-date (Duration .hours 1))
+                        (content "repeating")
+                        scaffold-messenger) )
+          .child (m/Text "+1 h"))])
+       
+       (m/Row
+        .mainAxisAlignment m/MainAxisAlignment.center
+        .children
+        [(m/TextButton
+          .onPressed (fn []
+                       (update-datetime
+                        section-name
+                        (.subtract current-date (Duration .days 1))
+                        (content "repeating")
+                        scaffold-messenger) )
+          .child (m/Text "-1 d"))
+         (f/widget
+          :context ctx
+          :get [m/ScaffoldMessenger]
+          (m/OutlinedButton.icon
+           .onPressed (fn []
+                        (println "current date " current-date)
+                        (model/unfocus-then-run
+                         (when-let [selected-date (await (m/showDatePicker
+                                                          .context ctx
+                                                          .firstDate (.subtract
+                                                                      current-date
+                                                                      (Duration .days 1))
+
+                                                          .lastDate (.add current-date
+                                                                          (Duration .days 1000))
+
+                                                          .initialDate current-date))]
+
+                           (let [selected (DateTime
+                                           (.-year selected-date)
+                                           (.-month selected-date)
+                                           (.-day selected-date)
+                                           (.-hour current-date)
+                                           (.-minute current-date))]
+                             (cond
+                               (.isAfter
+                                (.add (DateTime.now)
+                                      (Duration .minutes 4))
+                                selected)
+                               (model/snackbar scaffold-messenger "To get a notification, you need to be online and set a date at least 3 minutes into the future.")
+
+                               kIsWeb (.showSnackBar scaffold-messenger
+                                                     (m/SnackBar .content
+                                                                 (m/Text "Notifications are not supported on the web client yet."))))
+
+                             (update-datetime
+                              section-name
+                              selected
+                              (content "repeating")
+                              scaffold-messenger))))
+                        nil)
+           .icon (m/Icon m/Icons.calendar_today)
+           .label (m/Text "Date")))
+
+         (m/TextButton
+          .onPressed (fn []
+                       (update-datetime
+                        section-name
+                        (.add current-date (Duration .days 1))
+                        (content "repeating")
+                        scaffold-messenger) )
+          .child (m/Text "+1 d"))])
+       (m/SizedBox .width 5)
+       (f/widget
+        :watch [premium? (rd/subscribe [::model/premium?])]
+        :context ctx
+        :get [m/ScaffoldMessenger]
+
+        (m/OutlinedButton.icon
+         .label (m/Text "Repeat")
+         .icon (if premium?
+                 (m/Icon m/Icons.repeat)
+                 (m/Icon m/Icons.star_outline))
+         .onPressed
+         (fn []
+           (if premium?
+             (popup/set-repeating-popup ctx section-name)
+             (model/paywall scaffold-messenger)))))
+
+       (f/widget
+        :watch [note (rd/subscribe [::model/current-note])]
+        (m/OutlinedButton.icon
+         .label (m/Text "Pin to notifications")
+         .icon (m/Icon m/Icons.push_pin)
+         .onPressed (fn []
+                      (let [description (get-in note [:sections section-name "content" "description"])
+                            title (cond
+                                    (not (string/blank? description)) description
+                                    (not (string/blank? (:title note))) (:title note)
+                                    (not (string/blank? (:plaintext note))) (:plaintext note))
+
+                            body (cond
+                                    (not (string/blank? description)) description
+                                    (not (string/blank? (:title note))) (:title note)
+                                    (not (string/blank? (:plaintext note))) (:plaintext note))]
+                        (await (model/request-notification-permission true))
+                        (await
+                         (.createNotification
+                          (notif/AwesomeNotifications)
+
+                          .content
+                          (notif/NotificationContent
+                           .id 84885
+                           .channelKey "reminder_channel"
+                           .title title
+                           .body body
+                           .displayOnBackground true
+                           .displayOnForeground true
+                           .criticalAlert true
+                           .wakeUpScreen true
+                           .timeoutAfter (Duration .hours 72)
+                           .autoDismissible false)))
+                        nil))))])])))
+
+(defn show [section-name]
+  (f/widget
+   :context ctx
+   :watch [{{:strs [content id]} section-name} (rd/subscribe [::model/current-sections])]
+   :key (str section-name id)
+   :managed [focus-node (m/FocusNode)
+             tc (m/TextEditingController)]
+   :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                (fn [_]
+                  (when content
+                    (.-text! tc (str (content "description")))))) :dispose nil]
+
+   :bg-watcher ([focused? focus-node :> .-hasFocus]
+                (when-not focused?
+                  (rd/dispatch [::model/update-current-note
+                                #(assoc-in %
+                                           [:sections section-name "content" "description"]
+                                           (.-text tc))])))
+
+   :let [finished? (or (content "finished") false)]
+
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.start
+    .children
+    [(f/widget
+      :get {{tthm .-textTheme} m/Theme}
+      :watch [brightness (rd/subscribe [::model/get-brightness])]
+      (m/ListTile
+       .title
+       (m/TextField
+        .focusNode focus-node
+        .maxLines nil
+        .decoration (m/InputDecoration
+                     .contentPadding (m/EdgeInsets.only .top 15)
+                     .prefixIcon (m/Checkbox .value finished?
+                                             .onChanged
+                                             (fn [b]
+                                               (model/unfocus-then-run
+                                                (rd/dispatch [::model/update-current-note
+                                                              #(assoc-in % [:sections section-name "content" "finished"] b)]))))
+                     .hintText "Optional description"
+                     .hintStyle (.-bodySmall tthm))
+        .controller tc)))
+     (toolbar (or content {}) section-name)])))
+
+
+

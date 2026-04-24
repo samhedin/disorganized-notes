@@ -1,0 +1,361 @@
+(ns disorganized.ui.show-grid-note
+  (:require ["package:flutter/material.dart" :as m]
+            ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage]]
+            ["package:scribble/scribble.dart" :as scribble]
+            ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage]]
+            ["package:disorganized_notes/utils.dart" :as dutils]
+            ["dart:io" :refer [File Directory]]
+            [disorganized.model :as model]
+
+            [disorganized.ui.media :as media]
+            ["package:path/path.dart" :refer [basename]]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+            [clojure.string :as string]
+            [disorganized.ui.popup :as popup]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            [disorganized.model :as utils]
+            [hti.re-dash.alpha :as rd]
+            [disorganized.ui.theme :as theme]
+            ["dart:convert" :as c]
+            [disorganized.ui.gps :as gps]
+            [cljd.flutter :as f]))
+
+(defn location [section tthm]
+  (if-let [placemark (get-in section ["content" "placemark"])]
+    (m/Column
+     .crossAxisAlignment m/CrossAxisAlignment.start
+     .children
+     (gps/placemark-texts (model/dart->clj-ds
+                           (c/jsonDecode placemark)) tthm))
+    (m/Text "location not set")))
+
+(defn show-table [section]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   (m/DataTable
+    .border (m/TableBorder.symmetric
+             .outside (m/BorderSide.none)
+             .inside (m/BorderSide.none))
+    .dividerThickness 0.00001
+    .columnSpacing 10
+    .headingRowHeight 20
+    .dataRowMinHeight 20
+    .dataRowMaxHeight 25
+
+    .horizontalMargin 1
+    .columns (mapv
+              #(m/DataColumn
+                .label (m/Text (str %)
+                               .overflow m/TextOverflow.clip))
+              (take 3 (section "columns")))
+
+    .rows (for [{:strs [data]} (take 2 (section "content"))]
+            (m/DataRow
+             .cells
+             (for [c (take 3 (section "columns"))
+                   :let [item (data c)]]
+               (m/DataCell
+                (m/Text (str item)
+                        .style (.-bodySmall tthm)))))))))
+
+(defn show-table2 [section]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+
+   (m/DataTable
+    .border (m/TableBorder.symmetric
+             .outside (m/BorderSide.none)
+             .inside (m/BorderSide.none))
+    .headingRowHeight 20
+    .dataRowMinHeight 20
+    .dataRowMaxHeight 25
+
+    .dividerThickness 0.00001
+    .columnSpacing 10
+    .horizontalMargin 1
+    .columns (mapv
+              #(m/DataColumn
+                .label (m/Text (str (% "name"))
+                               .overflow (m/TextOverflow.clip)))
+              (take 2 (section "columns")))
+    .rows (for [{:strs [data]} (take 2 (section "content"))]
+            (m/DataRow
+             .cells
+             (for [c (take 2 (section "columns"))
+                   :let [item  (data (c "cid"))]]
+               (m/DataCell
+                (m/Text (str item)
+                        .style (.-bodySmall tthm)
+
+                        .overflow m/TextOverflow.ellipsis))))))))
+
+(defn show-list-item [data padding]
+  (f/widget
+   :padding {:left padding}
+   :let [size 9]
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   (m/Row
+    .children
+    [(m/Opacity
+      .opacity 0.75
+      .child
+      (m/Container
+       .width size
+       .height size
+       .decoration  (m/BoxDecoration
+                     .shape m/BoxShape.circle
+                     .border (m/Border.all
+                              .color (if (= m/Brightness.dark brightness)
+                                       m/Colors.white
+                                       m/Colors.black)
+                              .width 1))))
+     (m/SizedBox .width 5)
+
+     (m/Expanded
+      .child (m/Text
+              (str data)
+              .style (.-bodySmall tthm)
+              .overflow m/TextOverflow.ellipsis))])))
+
+(defn show-list [section]
+  (let [checkboxes? (section "checkboxes-visible")]
+    (f/widget
+     :watch [brightness (rd/subscribe [::model/get-brightness])]
+     :let [faded (theme/faded-text-style brightness)]
+
+     (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (flatten
+       (for [item (take 2 (section "content"))
+             :let [children (item "children")
+                   text (item "data")
+                   checked? (item "checkbox")]]
+         (concat
+          [(show-list-item (item "data") 0)]
+          (for [c children]
+            (show-list-item (c "data") 20)))))))))
+
+(defn show-network-images [folder-id user-id]
+  (f/widget
+   :context ctx
+   :watch [file-urls  (media/download-files-web folder-id) :default []]
+   :key (count file-urls)
+   (m/Column
+    .children
+    [(m/ConstrainedBox
+      .constraints (m/BoxConstraints .maxWidth 300
+                                     .maxHeight (cond
+                                                  (empty? file-urls) 0
+                                                  (= 1 (count file-urls)) 300
+                                                  :else (+ 200
+                                                           (* (count file-urls)
+                                                              10))))
+      .child
+      (if (= 1 (count file-urls))
+        (CachedNetworkImage
+         .imageUrl (:url (first file-urls))
+         .height 500
+         .width 500
+         .fit (m/BoxFit.contain))
+        (m/Stack
+         .children
+         (map-indexed (fn [i f]
+                        (f/widget
+                         (m/Positioned
+                          .top (* i 10)
+                          .left (* i 10))
+                         (m/ClipRRect
+                          .borderRadius (m/BorderRadius.circular 15.0))
+                         (m/ConstrainedBox
+                          .constraints (m/BoxConstraints .maxWidth 200
+                                                         .maxHeight 200))
+                         (m/Image.network (:url f)
+                                          .fit (m/BoxFit.contain))))
+                      file-urls))))])))
+
+(defn show-text [section]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :let [content (section "content")
+         brightness (rd/subscribe [::model/get-brightness])
+         ^m/TextStyle faded (theme/faded-text-style brightness)]
+   (m/Text (str (section "content")))))
+
+(defn show-other-media [folder-id]
+  (f/widget
+   :context ctx
+   :watch [files (rd/subscribe [::model/files-on-disk-sub folder-id])
+           file-urls (media/download-files-web folder-id) :default []]
+
+   :let [files (take 1
+                     (if kIsWeb
+                       file-urls
+                       (map #(File %) files)))]
+
+   (m/ListView
+    .shrinkWrap true
+    .physics (m/NeverScrollableScrollPhysics)
+    .children
+    (for [f files]
+      (m/Text
+       (if kIsWeb
+         (str ((clojure.string/split (:url f) #"/|\?|%2F") 10)) ;;Extracts the name part of the url. Weird I know.
+         (str (basename (.-path f)))))))))
+
+(defn show-reminder [section timeformat-24-hours?]
+  (m/Text (str (model/reminder-string (section "content") timeformat-24-hours?))))
+
+(defn show-media [section-id section user-id & [local-images?]]
+
+  (let [folder-id (get-in section ["content" "id"])
+        type (get-in section ["content" "type"])]
+
+    (if (or (= "images" type) (= "draw" type))
+      (show-network-images folder-id user-id)
+      (show-other-media folder-id))))
+
+(defn show-mindmap [section]
+  (if-let [url? (get-in section ["content" "image_url"])]
+    (CachedNetworkImage
+     .imageUrl url?
+     .placeholder (fn [_ _]
+                    (m/SizedBox
+                     .height 50
+                     .width 50
+                     .child (m/Center
+                             .child (m/CircularProgressIndicator))))
+
+     .errorWidget (fn [_ _ error]
+                    (m/Icon m/Icons.error))
+     .height 200
+     .width 300
+     .fit (m/BoxFit.contain))
+    (m/Text "Mindmap")))
+
+(defn show-media2 [section-id section]
+
+  (let [type (get-in section ["content" "type"])
+        url-names (or (first (get-in section ["content" "url-names"])) {})]
+    (if (and (or (= "images" type) (= "camera" type) (= "draw" type)) url-names (url-names "url"))
+      (CachedNetworkImage
+       .imageUrl (url-names "url")
+       .placeholder (fn [_ _]
+                      (m/SizedBox
+                       .height 50
+                       .width 50
+                       .child (m/Center
+                               .child (m/CircularProgressIndicator))))
+       .errorWidget (fn [_ _ error]
+                      (m/Icon m/Icons.error))
+       .height 300
+       .width 200
+       .fit (m/BoxFit.contain))
+      (m/Text (str (if-let [n (url-names "name")]
+                     n
+                     "media"))))))
+
+(defn show-drawing
+  [section-name section]
+  (m/SizedBox
+   .height 300
+   .width 500
+   .child
+   (m/Align
+    .alignment m/Alignment.topLeft
+    .child (m/Transform.scale
+            .scale 0.5
+            .child (scribble/ScribbleSketch.new
+                    .sketch (if-let [j (get-in section ["content" "json"])]
+                              (scribble/Sketch.fromJson
+                               (dutils/recursivelyStringifyKeys j))
+                              (scribble/Sketch.new .lines [])))))))
+
+(defn show-voice [section]
+  (m/Text
+   (or (get-in section ["content" "transcription2"])
+       "voice")))
+
+(defn show-texts [note tthm]
+  (if (not (string/blank? (:title note)))
+    (concat
+     [(m/Text (:title note)
+              .maxLines 1
+              .style (.-titleMedium tthm)
+              .overflow m/TextOverflow.ellipsis)
+      (m/SizedBox .height 5)]
+
+     (when (not (string/blank? (:plaintext note)))
+       [(m/Text (str (:plaintext note))
+                .maxLines 2
+                .style (.-bodySmall tthm)
+                .overflow m/TextOverflow.ellipsis)
+        (m/SizedBox .height 5)]))
+
+    (when (not (string/blank? (:plaintext note)))
+      (let [[first-line rest] (string/split (:plaintext note) #"\n" 2)]
+        (concat
+         [(m/Text (str first-line)
+                  .maxLines 1
+                  .style (.-titleMedium tthm)
+                  .overflow m/TextOverflow.ellipsis)]
+         (when rest
+           [(m/Text (str rest)
+                    .maxLines 3
+                    .style (.-bodySmall tthm)
+                    .overflow m/TextOverflow.ellipsis)])
+         [(m/SizedBox .height 5)])))))
+
+(defn show-note [note & [local-images?]]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :get [:timeformat-24-hours?]
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :let [faded (theme/faded-text-style brightness)]
+
+   :let [style (.merge
+                (.-bodySmall tthm)
+                (theme/faded-text-style brightness))]
+   (let [sections (sort-by (fn [[_ {:strs [section-position]}]]
+                             section-position)
+                           (:sections note))]
+     (m/Column
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (concat
+       (show-texts note tthm)
+
+       (when (seq (:tags note))
+         [(m/Row
+           .mainAxisAlignment m/MainAxisAlignment.start
+           .children (mapv #(f/widget
+                             :padding {:right 5}
+                             (m/Text %
+                                     .style style)) (:tags note)))
+          (m/SizedBox .height 5)])
+
+       (flatten
+        (for [[section-id section] (take 1 sections)
+              :let [type (section "type")
+                    section-name (str (section "name"))]]
+          [;; (m/Text section-name
+           ;;         .style faded)
+           (case type
+             "table" (show-table section)
+             "voice" (show-voice section)
+             "table2" (show-table2 section)
+             "list" (show-list section)
+             "text" (show-text section)
+             "reminder" (show-reminder section timeformat-24-hours?)
+             "mindmap" (show-mindmap section)
+             ;;The media needs to know the owner of the note to
+             ;;find the content
+             "media" (show-media section-id section (:owner note) local-images?)
+             "media2" (show-media2 section-id section)
+             "draw"  (show-drawing section-name section)
+             "location" (location section tthm)
+             (m/Text (if (= section-name type)
+                       (str type)
+                       (str section-name ": " type))))])))))))

@@ -1,0 +1,419 @@
+(ns disorganized.ui.mindmap
+  (:require ["package:flutter/material.dart" :as m]
+            ["package:flutter/widgets.dart" :as f_widgets]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference]]
+            ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage]]
+            [disorganized.ui.show-grid-note :as grid]
+            [clojure.string :as str]
+            ["package:disorganized_notes/utils.dart" :as dutils]
+            [cljd.flutter :as f]
+            [hti.re-dash.alpha :as rd]
+            [disorganized.model :as model]
+            ["package:go_router/go_router.dart"
+             :as go_router :refer [GoRouter GoRoute GoRouterState GoRouterHelper]]
+            ["package:flutter_mind_map/adapter/i_link_adapter.dart" :as i-link-adapter]
+            ["package:flutter_mind_map/adapter/i_node_adapter.dart" :as i-node-adapter]
+            ["package:flutter_mind_map/adapter/i_theme_adapter.dart" :as i-theme-adapter]
+            [disorganized.ui.theme :refer [hsl]]
+            ["package:flutter_mind_map/base64_image_validator.dart" :as base64-image-validator]
+            ["package:flutter_mind_map/i_mind_map_node.dart" :as i-mind-map-node]
+            ["package:flutter_mind_map/link/arc_line_linek.dart" :as arc-line-linek]
+            ["package:flutter_mind_map/link/beerse_line_link.dart" :as beerse-line-link]
+            ["package:flutter_mind_map/link/i_link.dart" :as i-link]
+            ["package:flutter_mind_map/link/line_link.dart" :as line-link]
+            ["package:flutter_mind_map/link/oblique_broken_line.dart" :as oblique-broken-line]
+            ["package:flutter_mind_map/link/poly_line_link.dart" :as poly-line-link]
+            ["package:flutter_mind_map/mind_map.dart" :as mind-map]
+            ["package:flutter_mind_map/mind_map_node.dart" :refer [MindMapNode]]
+            ["package:flutter_mind_map/theme/i_mind_map_theme.dart" :refer [IMindMapTheme]]
+            ["package:flutter_mind_map/theme/json_theme.dart" :as json-theme]
+            ["package:flutter_mind_map/theme/mind_map_theme_compact.dart" :refer [MindMapThemeCompact]]
+            ["package:flutter_mind_map/theme/mind_map_theme_large.dart" :as mind-map-theme-large]
+            ["package:flutter_mind_map/theme/mind_map_theme_normal.dart" :as mind-map-theme-normal]
+            [clojure.string :as string]))
+
+(defn node->metadata [node]
+  (model/dart->clj-ds (.getMetadata node)))
+
+(defn theme-map [light?]
+  (dutils/stringKeys
+   {"BackgroundColor" (if light?
+                        (hsl 0 0 1)
+                        (hsl 0 0 0.05)) ;; surfaceContainerHighest (card bg)
+    "TextColor"       (if light?
+                        (hsl 0 0 0.05)
+                        (hsl 0 0 0.95)) ;; onSurface
+    "FontSize"        16.0
+    "Bold"            false
+    "LinkColor"       (if light? (hsl 0 0 0.8)
+                          (hsl 0 0 0.2)) ;; outlined button border
+    "LinkWidth"       1.5
+    "HSpace"          50
+    "VSpace"          20
+    "Border"          (m/Border.all
+                       .color (if light?
+                                (hsl 0 0 0.8)
+                                (hsl 0 0 0.2))
+                       .width 1.0
+                       .style m/BorderStyle.solid
+                       .strokeAlign m/BorderSide.strokeAlignOutside)
+    "BorderRadius"    (m/BorderRadius.circular 17)
+    "Padding"         (m/EdgeInsets.all 16)
+    "Link"            (beerse-line-link/BeerseLineLink)}))
+
+; https://pub.dev/packages/flutter_mind_map#custom-theme
+(deftype LightTheme [] IMindMapTheme
+         (getName [this] "Disorganized Light")
+
+         (getBackgroundColor [this] (hsl 0 0 0.95)) ;; surface
+
+         (getThemeByLevel [this level]
+           (theme-map true)))
+
+(deftype DarkTheme [] IMindMapTheme
+         (getName [this] "Disorganized Dark")
+
+         (getBackgroundColor [this] m/Colors.transparent) ;; surface
+
+         (getThemeByLevel [this level]
+           (theme-map false)))
+
+(defn export-image [mm section-id]
+  (let [img (await (.toPng mm))
+        storage-ref (FirebaseStorage.instance.ref)
+        uid (model/uid)
+        ref (.child storage-ref (str "/media2/" uid "/" section-id "/export.png"))]
+    (await (.putData ref img))
+    (let [url (await (.getDownloadURL ref))]
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      ;;If the user deletes the section during the above callbacks we shouldn't write to the missing section, this would break the note.
+                      (if (get-in m [:sections section-id])
+                        (assoc-in m [:sections section-id "content" "image_url"] url)
+                        m))]))))
+
+(defn edit-node-dialog [ctx node]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .content
+     (m/TextButton
+      .child (m/Text "Change type")
+      .onPressed (fn []
+                   (let [metadata (node->metadata node)]
+                     (.setMetadata
+                      node
+                      (dutils/stringKeys
+                       (if (= "text" (metadata "type"))
+                         {"type" "note"}
+                         {"type" "text"}))))))
+
+     .actions [(m/TextButton
+                .onPressed (fn []
+                             (.pop navigator))
+                .child (m/Text "cancel"))]))))
+
+(defn save-map [mindmap section-id]
+  (rd/dispatch
+   [::model/update-current-note
+    (fn [m]
+      (assoc-in m [:sections section-id "content" "json"]
+                (.toJson mindmap)))]))
+
+(defn exit [section-id current-note ctx mindmap]
+  (save-map mindmap section-id)
+  (export-image mindmap section-id))
+
+(defn note-child [node]
+  (.setChild
+   node
+   (m/Material
+    .type m/MaterialType.transparency
+    .child
+    (f/widget
+     :watch [current-note (rd/subscribe [::model/current-note])]
+     :watch [saved-notes (rd/subscribe [::model/get-notes])
+             id->index (rd/subscribe [::model/id->saved-notes-index])]
+     :managed [metadata (model/dart->clj-ds (.getMetadata node)) :dispose nil
+               id (metadata "note-id") :dispose nil
+               index? (id->index id) :dispose nil]
+
+     :get [:mindmap :section-id]
+     :context ctx
+     (m/InkWell
+      .child
+      (f/widget
+       :padding {:horizontal 12
+                 :vertical 12}
+       (m/SizedBox
+        .width 150
+        .height 150
+        .child (if index?
+                 (grid/show-note (nth saved-notes index?))
+                 (m/Text "<Note not found>"))))
+
+      .onLongPress
+      (fn []
+        (edit-node-dialog ctx node))
+
+      .onTap (fn []
+               (save-map mindmap section-id)
+               (when index?
+                 (let [metadata (model/dart->clj-ds (.getMetadata node))]
+                   (-> ctx go_router/GoRouterHelper
+                       (.pushNamed "edit"
+                                   .pathParameters {"id" (metadata "note-id")}
+                                   .extra {:autofocus false
+                                           :old-note? current-note}))
+                   nil)))))))
+  (.refresh node))
+
+(defn text-child [node]
+  (.setChild
+   node
+   (m/Material
+    .type m/MaterialType.transparency
+    .child
+    (f/widget
+     :get {{tthm .-textTheme} m/Theme}
+     (m/SizedBox
+      .width 150
+      .child
+      (let [data (model/dart->clj-ds (.getMetadata node))
+            text (data "text")]
+
+        (f/widget
+         :managed [tc (m/TextEditingController)
+                   _ (m/WidgetsBinding.instance.endOfFrame.then
+                      (fn [_]
+                        (when (str/blank? (.-text tc))
+                          (.-text! tc (str text))))) :dispose nil]
+         (m/TextField
+          .textCapitalization m/TextCapitalization.sentences
+          .autocorrect true
+          .enableSuggestions true
+          .onChanged (fn [text]
+                       (.addMetadata node "text" text))
+
+          .controller tc
+          .maxLines nil)))))))
+  (.refresh node))
+
+(defn pick-note [ctx current-note-id]
+  (m/showModalBottomSheet
+   .context ctx
+   .isScrollControlled true
+   .builder
+   (f/build
+    :get {{cs .-colorScheme} m/Theme}
+    :color (.-surfaceContainerHigh cs)
+    :get [m/Navigator]
+    :watch [saved-notes (rd/subscribe [::model/get-notes])]
+
+    :managed [saved-notes  (filter #(not= (:id %) current-note-id) saved-notes) :dispose nil
+              radius (m/Radius.circular 17) :dispose nil
+              border (m/RoundedRectangleBorder
+                      .borderRadius (m/BorderRadius.all radius))
+              :dispose nil]
+    (m/SizedBox
+     .height 500
+     .child
+     ;(.pop navigator (:id note))
+     (m/ListView.builder
+      .itemCount (count saved-notes)
+      .itemBuilder (fn [_ i]
+                     (f/widget
+                      :padding {:horizontal 24
+                                :vertical 8}
+                      :let [note (nth saved-notes i)]
+                      (m/InkWell
+                       .customBorder border
+                       .onTap (fn []
+                                (.pop navigator (:id note))))
+                      (m/Card
+                       .elevation 0)
+                      (f/widget
+                       :padding {:horizontal 24
+                                 :vertical 12}
+                       (grid/show-note note)))))))))
+
+(defn type-selector [node]
+  (.setChild
+   node
+   (m/Material
+    .type m/MaterialType.transparency
+    .child
+    (f/widget
+     :watch [current-note (rd/subscribe [::model/current-note])]
+     :get {{tthm .-textTheme} m/Theme}
+     :context ctx
+     (m/Column
+      .spacing 4
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Node Type"
+               .style (.-titleSmall tthm))
+
+       (m/OutlinedButton
+        .child (m/Text "Text")
+        .onPressed (fn []
+
+                     (.setMetadata
+                      node
+                      (dutils/stringKeys
+                       {"type" "text"}))
+
+                     (text-child node)))
+
+       (m/OutlinedButton
+        .child (m/Text "Note")
+        .onPressed (fn []
+                     (when-let [id (await (pick-note ctx (:id current-note)))]
+                       (.setMetadata
+                        node
+                        (dutils/stringKeys
+                         {"type" "note"
+                          "note-id" id}))
+                       (note-child node))))]))))
+  (.refresh node))
+
+(defn load-nodes [root]
+  (let [metadata (model/dart->clj-ds (.getMetadata root))]
+    (case (metadata "type")
+      "text" (text-child root)
+      "note" (note-child root)
+      nil (type-selector root))
+    (mapv load-nodes (.getRightItems root))
+    (mapv load-nodes (.getLeftItems root))))
+
+(def ^m/Widget mindmap
+  (f/build
+   [^GoRouterState router-state]
+
+   :watch [notes (rd/subscribe [::model/get-notes])]
+   :watch [current-note (rd/subscribe [::model/current-note])
+           loaded? (atom false) :as *loaded?
+           brightness (rd/subscribe [::model/get-brightness])]
+
+   :get {{cs .-colorScheme} m/Theme}
+   :get [m/Navigator]
+   :managed [section-id (-> router-state .-extra :section-id) :dispose nil
+             mm (mind-map/MindMap) :dispose nil
+             _ (m/WidgetsBinding.instance.endOfFrame.then
+                (fn [_]
+                  (println "HELLO")
+                  (if (= m/Brightness.dark brightness)
+                    (do (.setTheme mm (DarkTheme))
+                        (.setBackgroundColor mm (hsl 0 0 0)))
+                    (.setTheme mm (LightTheme)))
+
+                  (if (not loaded?)
+
+                    (if-let [json (dutils/recursivelyStringifyKeys
+                                   (get-in current-note [:sections section-id "content" "json"]))]
+                      (do (.fromJson mm json)
+
+                          (.addMetadata (.getRootNode mm) "type" "text")
+
+                          (when (string/blank? ((node->metadata (.getRootNode mm)) "text"))
+                            (.addMetadata (.getRootNode mm) "text" "root"))
+
+                          (load-nodes (.getRootNode mm)))
+
+                      ;;First time the mindmap is created/opened
+                      (do (.addMetadata (.getRootNode mm) "text" "root")
+                          (load-nodes (.getRootNode mm))))
+
+                    (reset! *loaded? true))
+
+                  (.addOnEditListeners mm
+                                       (fn [node]
+                                         (println  "edited " node)))
+
+                  (.addOnNodeAddedListeners mm type-selector)
+
+                  (.addOnSelectedNodeChangedListeners mm (fn []))
+
+                  (.addOnChangedListeners mm (fn []))
+                  nil)) :dispose nil
+
+             _ (f_widgets/AppLifecycleListener
+
+                .onHide (fn []
+                          (save-map mm section-id)
+
+                          nil))]
+
+   :bg-watcher ([brightness (rd/subscribe [::model/get-brightness])]
+                (println "BRIGHTNESS ")
+                ;; (if (= m/Brightness.dark brightness)
+                ;;   (.setTheme mm jtheme-dark)
+                ;;   (.setTheme mm jtheme-light)
+                ;;   )
+                )
+
+   :bind {:mindmap mm
+          :section-id section-id}
+   m/Material
+   (f/widget
+    :context ctx
+    (m/PopScope
+     .canPop true
+     .onPopInvokedWithResult
+     (fn [_ _]
+       (println "pop invoked!")
+       (exit section-id current-note ctx mm))
+
+     .child
+     (m/Scaffold
+      .appBar (m/AppBar)
+      .body
+      (m/Container
+       .color (if (= m/Brightness.dark brightness)
+                (hsl 0 0 0)
+                (hsl 0 0 0.95))
+       .child
+       (m/SafeArea
+        .child mm)))))))
+
+(defn show [section-id]
+  (f/widget
+   :watch [current-note (rd/subscribe [::model/current-note])]
+   :let [url? (get-in current-note [:sections section-id "content" "image_url"])]
+   :context ctx
+   (m/Column
+    .children
+    (concat
+     (when url?
+       [(m/InkWell
+         .onTap (fn []
+
+                  (-> ctx go_router/GoRouterHelper
+                      (.push "/mindmap"
+                             .extra {:section-id section-id}))
+                  nil)
+         .child (CachedNetworkImage
+                 .imageUrl url?
+                 .placeholder (fn [_ _]
+                                (m/SizedBox
+                                 .height 50
+                                 .width 50
+                                 .child (m/Center
+                                         .child (m/CircularProgressIndicator))))
+
+                 .errorWidget (fn [_ _ error]
+                                (m/Icon m/Icons.error))
+                 .height 400
+                 .width 600
+                 .fit (m/BoxFit.contain)))])
+
+     [(m/OutlinedButton
+       .child (m/Text "Open mindmap")
+       .onPressed (fn []
+                    (-> ctx go_router/GoRouterHelper
+                        (.push "/mindmap"
+                               .extra {:section-id section-id}))
+                    nil))]))))

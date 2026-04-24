@@ -1,0 +1,127 @@
+(ns disorganized.import.markdown
+  (:require [cljd.flutter :as f]
+            [disorganized.ui.theme :as theme]
+            ["package:archive/archive.dart" :as arch]
+            [cljd.dart.isolates :as di]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            [clojure.walk :as w]
+            ["package:disorganized_notes/firestore_db.dart" :as fdb]
+            ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+            [cljd.reader :as reader]
+            ["package:path_provider/path_provider.dart" :refer [getApplicationDocumentsDirectory]]
+            
+            [clojure.string :as string]
+            ["dart:convert" :as c]
+            [disorganized.model :as model]
+            ["package:flutter/material.dart" :as m]
+            [hti.re-dash.alpha :as rd]
+            ["package:file_picker/file_picker.dart" :refer [FilePicker FileType]]
+            ["dart:io" :refer [File Directory]]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+            ["package:flutter_archive/flutter_archive.dart" :refer [ZipFile]]
+            ["package:archive/archive_io.dart" :refer [ArchiveFile ZipFileEncoder ZipDecoder InputFileStream]]))
+
+(defn markdown->note [text]
+  (let [combined #"^\s*[-*+]\s+\[(x|\s)\]\s+(.*)"
+        items (reduce (fn [acc [_ state item]]
+                        (if (= state "x")
+                          (update acc :checked conj item)
+                          (update acc :unchecked conj item)))
+                      {:checked [] :unchecked []}
+                      (re-seq combined text))
+
+        list-section (-> (model/default-section-map "list" 0 "list")
+                         (assoc "content"
+                                (mapv (fn [item]
+                                        {"id" (str (random-uuid))
+                                         "children" []
+                                         "data" item})
+                                      (:unchecked items)))
+                         (assoc "checked-content"
+                                (mapv (fn [item]
+                                        {"id" (str (random-uuid))
+                                         "children" []
+                                         "data" item})
+                                      (:checked items))))
+
+        note (if (seq items)
+               (-> (model/init-new-note)
+                   (assoc :plaintext text)
+                   (assoc :sections {(list-section "id")
+                                     list-section}))
+               (assoc (model/init-new-note) :plaintext text))]
+
+    (await (model/import-note note))))
+
+(defn pick-files []
+  (when-let [result (await (FilePicker.platform.pickFiles
+                            .type FileType.custom
+                            .allowMultiple true
+                            .allowedExtensions ["md" "txt"]))]
+    (let [files (into [] (.-xFiles result))
+          strings (await (Future.wait (mapv #(.readAsString %) files)))]
+      (doseq [s strings]
+        (await (markdown->note s))))
+    (rd/dispatch [::model/refresh-notes])))
+
+(defn import [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Import Markdown or txt"
+               .style (.-titleMedium tthm))
+
+       (m/Text "All content will be placed in the topmost textfield, 
+however lists will be parsed.")])
+
+     .actions [(m/TextButton
+                .child (m/Text "Cancel")
+                .onPressed (fn []
+                             (.pop navigator)))
+               (m/TextButton
+                .child (m/Text "Select Markdown files")
+                .onPressed
+                (fn []
+                  (await (pick-files))
+                  (.pop navigator)
+                  nil))]))))
+
+
+(defn apple [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .children
+      [(m/Text "Import from Apple Notes"
+               .style (.-titleMedium tthm))
+
+       (m/Text "Apple Notes does not provide a straightforward way to export your data. 
+However, third party solutions exist. 
+Export the files to txt or markdown, and then use the button below.")])
+
+     .actions [(m/TextButton
+                .child (m/Text "Cancel")
+                .onPressed (fn []
+                             (.pop navigator)))
+               (m/TextButton
+                .child (m/Text "Select files")
+                .onPressed
+                (fn []
+                  (await (pick-files))
+                  (.pop navigator)
+                  nil))]))))

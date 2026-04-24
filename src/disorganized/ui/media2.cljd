@@ -1,0 +1,624 @@
+(ns disorganized.ui.media2
+  (:require
+   [disorganized.ui.image-carousel2 :as carousel2]
+   ["package:firebase_ai/firebase_ai.dart" :as ai]
+   ["package:mime/mime.dart" :refer [lookupMimeType]]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+   ["package:just_audio/just_audio.dart" :as ja]
+   ["package:http/http.dart" :as http]
+   ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference]]
+   ["package:cached_network_image/cached_network_image.dart" :refer [CachedNetworkImage]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:flutter/services.dart" :as svc]
+   ["dart:io" :refer [File Directory]]
+   ["package:image_picker/image_picker.dart" :refer [ImagePicker ImageSource]]
+   ["package:go_router/go_router.dart" :as go_router]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.string :as string]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:file_picker/file_picker.dart" :refer [FilePicker FileType]]
+   ["package:path/path.dart" :refer [basename]]
+   ["package:flutter/material.dart" :as m]
+   [cljd.flutter :as f]))
+
+(defn ai-create-image [prompt]
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+                                .model "gemini-2.5-flash-image"
+                                .generationConfig
+                                (ai/GenerationConfig
+                                 .responseModalities [ai/ResponseModalities.text
+                                                      ai/ResponseModalities.image]))
+
+        response (await (.generateContent model
+                                          [(ai/Content.text
+                                            (str "Generate an image: " prompt))]))
+
+        _ (println "received response " response)
+        image-bytes (when (.-isNotEmpty (.-inlineDataParts response))
+                      (.-bytes (first (.-inlineDataParts response))))]
+
+    (println "image bytes " image-bytes)))
+
+(defn upload-web "For uploading other file type on web"
+  [section-id type bytes name]
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media2/"
+                                            uid
+                                            "/"
+                                            section-id))
+        ref (.child folder-ref
+                    (str "/" name))]
+
+    (await (.putData ref (await bytes)))
+
+    (let [ref (.child folder-ref
+                      (str "/" name))
+          urls (await (.getDownloadURL ref))
+          url-name {"url" urls
+                    "name" name}]
+
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      ;;make sure section still exists otherwise we break everything.
+                      (if (get-in m [:sections section-id "content"])
+                        (update-in m
+                                   [:sections section-id "content"]
+                                   (fn [content]
+                                     (-> content
+                                         (assoc "type" type)
+                                         (update "url-names"
+                                                 #(into []
+                                                        (conj % url-name))))))
+                        m))]))))
+
+(defn upload [section-id type files]
+  (println "uploading")
+  (let [uid (:user-id (model/current-user))
+        storage-ref (FirebaseStorage.instance.ref)
+        folder-ref (.child storage-ref (str "/media2/"
+                                            uid
+                                            "/"
+                                            section-id))
+
+        urls (await (Future.wait
+                     (mapv (fn [file]
+                             (let [ref (.child folder-ref
+                                               (str "/" (if (or (= "images" type) (= "draw" type))
+                                                          (.-name file)
+                                                          (basename (.-path file)))))]
+                               (if (or (= "images" type) (= "draw" type))
+                                 (await (.putData ref (await (.readAsBytes file))
+                                                  (SettableMetadata
+                                                   .contentType (.-mimeType file))))
+                                 (await (.putData ref (await (.readAsBytes file)))))
+                               (await (.getDownloadURL ref)))) files)))
+
+        url-name (map (fn [u file]
+                        {"url" u
+                         "name"  (if (or (= "images" type) (= "draw" type))
+                                   (.-name file)
+                                   (basename (.-path file)))})
+                      urls
+                      files)]
+
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (update-in m
+                               [:sections section-id "content"]
+                               (fn [content]
+                                 (-> content
+                                     (assoc "type" type)
+                                     (update "url-names"
+                                             #(into []
+                                                    (concat % url-name)))))))])
+    url-name))
+
+(defn pick-images [section-id *uploading]
+  (let [picker (ImagePicker)
+        images (await (.pickMultiImage picker))]
+    (reset! *uploading true)
+    (when (seq images)
+      (await (upload section-id "images" images)))))
+
+(defn take-image [section-id  ^m/ScaffoldMessengerState scaffold-messenger]
+  (let [picker (ImagePicker)
+        image (await (.pickImage picker
+                                 .source ImageSource.camera))]
+    (when image (await (upload section-id "camera" [image])))))
+
+(defn show-images [section-id]
+  (f/widget
+   :watch [premium? (rd/subscribe [::model/premium?])]
+
+   :context ctx
+   :get [m/Navigator m/ScaffoldMessenger]
+   :let [*note (atom nil)]
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+
+   :let [captions (or (content "captions") {})
+         misc {:captions captions
+               :section-id section-id}]
+
+   ;;url names is a list of {"url" <image-url>, "name": <image name>"}
+   :let [url-names (content "url-names")]
+   :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                (fn [_]
+                  (rd/dispatch [::model/update-current-note
+                                (fn [m]
+                                  (reset! *note m)
+                                  m)])
+                  nil)) :dispose nil]
+
+   :key (count url-names)
+   (m/Column
+    .children
+    (concat
+     [(cond
+        (= 1 (count url-names))
+        (let [un (first url-names)]
+          (m/ClipRRect
+           .borderRadius theme/border-radius
+           .child (m/InkWell
+                   .onLongPress (fn []
+                                  (carousel2/image-popup ctx (un "url") (un "name") section-id false)
+                                  nil)
+                   .onTap (fn []
+
+                            (-> ctx go_router/GoRouterHelper
+                                (.pushNamed
+                                 "image-painter"
+                                 .extra {:url (un "url")
+                                         :name (un "name")
+                                         :section-id section-id}))
+                            nil)
+
+                   .child (CachedNetworkImage
+                           .imageUrl ((first url-names) "url")
+                           .placeholder (fn [_ _]
+                                          (m/SizedBox
+                                           .height 50
+                                           .width 50
+                                           .child (m/Center
+                                                   .child (m/CircularProgressIndicator))))
+                           .errorWidget (fn [_ _ error]
+                                          (m/Icon m/Icons.error))
+                           .height 400
+                           .width 400
+                           .fit (m/BoxFit.cover)))))
+        (>= 6 (count url-names))
+        (m/GridView.count
+         .shrinkWrap true
+         .physics (m/NeverScrollableScrollPhysics)
+         .crossAxisCount 2
+         .children
+         (mapv (fn [un]
+                 (m/InkWell
+                  .onLongPress
+                  (fn []
+                    (carousel2/image-popup ctx (un "url") (un "name") section-id false)
+                    nil)
+                  .onTap (fn []
+                           (-> ctx go_router/GoRouterHelper
+                               (.pushNamed
+                                "image-painter"
+                                .extra {:url (un "url")
+                                        :name (un "name")
+                                        :section-id section-id}))
+                           nil)
+
+                  .child (m/ClipRRect
+                          .borderRadius theme/border-radius
+                          .child (CachedNetworkImage
+                                  .imageUrl (un "url")
+                                  .placeholder
+                                  (fn [_ _]
+                                    (m/SizedBox
+                                     .height 50
+                                     .width 50
+                                     .child (m/Center
+                                             .child (m/CircularProgressIndicator))))
+
+                                  .errorWidget (fn [_ _ error]
+                                                 (m/Icon m/Icons.error))
+
+                                  .fit (m/BoxFit.contain)))))
+               url-names))
+
+        :else (m/InkWell
+               .onTap (fn []
+                        (-> ctx go_router/GoRouterHelper
+                            (.pushNamed
+                             "image-carousel2"
+                             .extra {:image-urls url-names
+                                     :note @*note
+                                     :section-id section-id
+                                     :captions captions
+                                     :misc misc}))
+                        nil)
+               .child
+               (m/ConstrainedBox
+                .constraints (m/BoxConstraints .maxWidth 600
+                                               .maxHeight 300)
+                .child (m/Stack
+                        .children
+                        (map-indexed (fn [i un]
+                                       (f/widget
+                                        (m/Positioned
+                                         .top (* i 3)
+                                         .left (* i 3))
+                                        (m/ClipRRect
+                                         .borderRadius (m/BorderRadius.circular 15.0))
+                                        (m/ConstrainedBox
+                                         .constraints (m/BoxConstraints .maxWidth 300
+                                                                        .maxHeight 400))
+                                        (CachedNetworkImage
+                                         .imageUrl (un "url")
+                                         .placeholder (fn [_ _]
+                                                        (m/SizedBox
+                                                         .height 50
+                                                         .width 50
+                                                         .child (m/Center
+                                                                 .child (m/CircularProgressIndicator))))
+                                         .errorWidget (fn [_ _ error]
+                                                        (m/Icon m/Icons.error))
+                                         .height 600
+                                         .width 500
+                                         .fit (m/BoxFit.contain))))
+                                     url-names)))))]
+
+     (when (= 1 (count url-names))
+       [(f/widget
+         :key (count url-names)
+         :managed [caption-tc (m/TextEditingController)]
+         :get {{tthm .-textTheme} m/Theme}
+         :let [url ((first url-names) "url")]
+         :watch [brightness (rd/subscribe [::model/get-brightness])]
+         :managed [focus-node (m/FocusNode)
+                   _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                          (fn [_]
+                            (.-text! caption-tc
+                                     (str (when captions
+                                            (captions url))))
+                            nil))
+                         nil) :dispose nil]
+
+         :bg-watcher ([focused? focus-node :> .-hasFocus]
+                      (when-not focused?
+                        (rd/dispatch [::model/update-current-note
+                                      (fn [m]
+                                        (update-in
+                                         m
+                                         [:sections section-id "content" "captions"]
+                                         (fn [captions]
+                                           (assoc (or captions {}) url (.-text caption-tc)))))])))
+
+         (m/TextField
+          .controller caption-tc
+          .textCapitalization m/TextCapitalization.sentences
+          .focusNode focus-node
+          .decoration (m/InputDecoration
+                       .hintText "Caption "
+                       .hintStyle (.merge
+                                   (.-bodySmall tthm)
+                                   (theme/faded-text-style brightness)))))])))))
+
+(defn pick-files [section-id  ^m/ScaffoldMessengerState scaffold-messenger type]
+  (when-let [result (await (FilePicker.platform.pickFiles
+                            .allowMultiple false
+                            .type (case type
+                                    "other" FileType.any
+                                    "audio" FileType.audio)))]
+    (if kIsWeb
+      (let [bytes (-> result .-files .-first .-bytes)
+            name (-> result .-files .-first .-name)]
+
+        (if (> 500000000 (count bytes))
+          (await (upload-web section-id type bytes name))
+          (.showSnackBar scaffold-messenger
+                         (m/SnackBar .content
+                                     (m/Text "All files must be below 50 MB")))))
+
+      (let [sizes (await (Future.wait (into [] (.map (.paths result) (fn [p]  (.length (File p)))))))]
+        (println "sizes " sizes)
+        (if (every? #(> 500000000 %) sizes)
+          (await (upload section-id type (into [] (.map (.paths result)
+                                                        (fn [p] (File p))))))
+
+          (.showSnackBar scaffold-messenger
+                         (m/SnackBar .content
+                                     (m/Text "All files must be below 50 MB"))))))))
+
+(defn- draw-button [ctx section-id another? *uploading?]
+  (f/widget
+   :get [m/MediaQuery :first-launch?]
+   :watch [onboarding-section (rd/subscribe [::model/onboarding-section])]
+   :let [button (m/OutlinedButton.icon
+                 .onPressed (fn []
+                              (reset! *uploading? true)
+                              (let [data (await (dutils/imageFromColor
+                                                 .color m/Colors.white
+                                                 .width (int (- (.-width (.-size media-query))
+                                                                50))
+
+                                                 .height (int (- (.-height (.-size media-query))
+                                                                 320))
+                                                 .pixelRatio 10))
+
+                                    xfile (XFile.fromData data
+                                                          .mimeType "image/png")
+                                    uns (await (upload section-id "draw" [xfile]))
+
+                                    un (first uns)]
+
+                                (reset! *uploading? false)
+                                (println "opening image painter")
+                                (-> ctx go_router/GoRouterHelper
+                                    (.pushNamed
+                                     "image-painter"
+                                     .extra {:url (un "url")
+                                             :name (un "name")
+                                             :section-id section-id}))
+                                nil))
+                 .label (m/Text (if another?
+                                  "Add another drawing"
+                                  "Draw"))
+                 .icon (m/Icon m/Icons.draw))]
+   
+   
+   (if (and first-launch? onboarding-section)
+     (model/outline button 0.8 1.5 30)
+     button)))
+
+(defn- pick-image-button [tthm section-id *uploading]
+  (m/OutlinedButton.icon
+   .onPressed (fn []
+
+                (await (pick-images section-id *uploading))
+                (reset! *uploading false))
+
+   .label (m/Text "Upload images")
+   .icon (m/Icon m/Icons.image)))
+
+(defn- take-image-button [tthm section-id  ^m/ScaffoldMessengerState scaffold-messenger *uploading?]
+  (m/OutlinedButton.icon
+   .onPressed (fn []
+                (reset! *uploading? true)
+                (await (take-image section-id scaffold-messenger))
+                (reset! *uploading? false))
+
+   .label (m/Text "Open camera")
+   .icon (m/Icon m/Icons.camera)))
+
+(defn pick-audio-button [section-id uploaded? *uploading?]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+   :let [{:strs [url name]} (first (when content (content "url-names")))]
+   (if (not uploaded?)
+     (m/OutlinedButton.icon
+      .onPressed (fn []
+                   (reset! *uploading? true)
+                   (await (pick-files section-id scaffold-messenger "audio"))
+                   (reset! *uploading? false))
+      .label (m/Text "Upload audio")
+      .icon (m/Icon m/Icons.speaker))
+     (m/Row
+      .mainAxisAlignment m/MainAxisAlignment.center
+      .children
+      [(m/OutlinedButton.icon
+        .onPressed (fn []
+                     (await (pick-files section-id scaffold-messenger "audio")))
+        .label (m/Text "Upload audio")
+        .icon (m/Icon m/Icons.upload))
+       (m/SizedBox .width 10)
+       (m/OutlinedButton.icon
+        .onPressed (fn []
+                     (if kIsWeb
+                       (dutils/downloadUrl url)
+
+                       (let [response (await (http/get (Uri.parse url)))
+                             mimetype (lookupMimeType name)
+                             bytes (.-bodyBytes response)
+                             xfile (XFile.fromData
+                                    bytes
+                                    .name name
+                                    .mimeType mimetype)
+
+                             params (ShareParams
+                                     .files [xfile]
+                                     .fileNameOverrides [name])]
+
+                         (await (SharePlus.instance.share params))
+                         nil))
+                     nil)
+        .label (m/Text "Download")
+        .icon (m/Icon m/Icons.download))]))))
+
+(defn show-audio [section-id]
+  (f/widget
+   :context ctx
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+   :managed [player (ja/AudioPlayer)]
+   :get [m/Navigator]
+   :let [{:strs [url name]} (first (content "url-names"))]
+   :padding {:bottom 10}
+   :get {{tthm .-textTheme} m/Theme}
+
+   :watch [{playing .-playing
+            playbackevent .-playbackEvent} (.playerEventStream player)
+           speed (atom 1.0) :as *speed]
+
+   (f/widget
+    m/Center
+    (m/Column
+     .children
+     [(m/Text name
+              .style (.-titleLarge tthm))
+      (m/SizedBox .height 10)
+      (m/OutlinedButton.icon
+       .icon (m/Icon m/Icons.play_arrow)
+
+       .label (m/Text "Play")
+       .onPressed
+       (fn []
+         (await (.setUrl player url))
+         (.play player)))
+      (m/SizedBox .height 10)
+
+      (m/OutlinedButton.icon
+       .onPressed (fn []
+                    (await (.pause player)))
+       .icon (m/Icon (m/Icons.pause))
+       .label (m/Text "Pause"))
+      (m/SizedBox .height 10)
+      (m/OutlinedButton.icon
+       .icon (m/Icon (m/Icons.stop))
+       .onPressed (fn []
+                    (await (.stop player)))
+       .label (m/Text "Stop"))
+      (m/SizedBox .height 10)
+      (m/Row
+       .mainAxisAlignment m/MainAxisAlignment.center
+       .children
+       [(m/OutlinedButton.icon
+         .label (m/Text "- 0.25x")
+         .icon (m/Icon (m/Icons.fast_rewind))
+         .onPressed (fn []
+                      (let [s (- speed 0.25)]
+                        (await (.setSpeed player s))
+                        (reset! *speed s))))
+        (m/OutlinedButton.icon
+         .label (m/Text "+ 0.25x")
+         .icon (m/Icon (m/Icons.fast_forward))
+         .onPressed (fn []
+                      (let [s (+ speed 0.25)]
+                        (await (.setSpeed player s))
+                        (reset! *speed s))))])]))))
+
+(defn- pick-other-button [tthm section-id *uploading?]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   :watch [premium? (rd/subscribe [::model/premium?])]
+   (m/OutlinedButton.icon
+    .onPressed (fn []
+                 (if premium?
+                   (do
+                     (reset! *uploading? true)
+                     (await (pick-files section-id scaffold-messenger "other")))
+                   (await (model/paywall scaffold-messenger)))
+                 (reset! *uploading? false))
+
+    .label (m/Text "Upload file")
+    .icon (if premium?
+            (m/Icon m/Icons.attach_file)
+            (m/Icon m/Icons.star_outline)))))
+
+(defn show-other [section-id]
+  (f/widget
+   :context ctx
+   :watch [{{:strs [content]} section-id}
+           (rd/subscribe [::model/current-sections])]
+
+   :get [m/Navigator]
+   :let [files (content "url-names")]
+
+   (m/ListView
+    .shrinkWrap true
+    .physics (m/NeverScrollableScrollPhysics)
+    .children
+    (for [f files]
+      (f/widget
+       :key (str f)
+       (m/ListTile
+        .dense true
+        .title (m/Text (f "name"))
+        .onTap (fn []
+                 (if kIsWeb
+                   (dutils/downloadUrl (f "url"))
+
+                   (let [response (await (http/get (Uri.parse (f "url"))))
+                         mimetype (lookupMimeType (f "name"))
+                         bytes (.-bodyBytes response)
+                         xfile (XFile.fromData
+                                bytes
+                                .name (f "name")
+                                .mimeType mimetype)
+
+                         params (ShareParams
+                                 .files [xfile]
+                                 .fileNameOverrides [(f "name")])]
+
+                     (await (SharePlus.instance.share params))
+                     nil))
+                 nil)
+        .onLongPress (fn []
+                       (popup/confirm ctx "Delete?"
+                                      (fn []
+                                        (rd/dispatch
+                                         [::model/update-current-note
+                                          (fn [m]
+                                            (update-in m [:sections section-id "content" "url-names"]
+                                                       (fn [uns]
+                                                         (into []
+                                                               (filter #(not= (f "url") (% "url")) uns)))))]))))))))))
+
+(defn show [section-id]
+  (f/widget
+   :key (str section-id "-media2")
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+   :padding {:bottom 10}
+   :get {{tthm .-textTheme} m/Theme}
+   :get [m/ScaffoldMessenger]
+   :watch [uploading? (atom false) :as *uploading?]
+   :context ctx
+   (m/AnimatedSwitcher
+    .duration (Duration .milliseconds 250)
+    .child
+    (if uploading?
+      (m/SizedBox
+       .height 50
+       .width 50
+       .child (m/Center
+               .child (m/CircularProgressIndicator)))
+      (m/Column
+       .crossAxisAlignment m/CrossAxisAlignment.stretch
+       .children
+       (case (content "type")
+         "images"  [(show-images section-id)
+                    (m/SizedBox .height 20)
+                    (pick-image-button
+                     tthm
+                     section-id
+                     *uploading?)]
+         "draw" [(show-images section-id)
+                 (m/SizedBox .height 20)
+                 (draw-button ctx section-id true
+                              *uploading?)]
+
+         "camera" [(show-images section-id)
+                   (take-image-button tthm section-id scaffold-messenger *uploading?)]
+
+         "audio" [(show-audio section-id)
+                  (pick-audio-button section-id (content "type") *uploading?)]
+
+         "other" [(show-other section-id)
+                  (pick-other-button tthm section-id *uploading?)]
+
+         nil
+         [(draw-button ctx section-id false *uploading?)
+          (pick-image-button tthm section-id *uploading?)
+          (m/SizedBox .width 5)
+          (take-image-button tthm section-id scaffold-messenger *uploading?)
+          (m/SizedBox .width 5)
+          (pick-audio-button section-id nil *uploading?)
+          (m/SizedBox .width 5)
+          (pick-other-button tthm section-id *uploading?)]))))))

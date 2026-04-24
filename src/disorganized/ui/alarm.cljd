@@ -1,0 +1,188 @@
+(ns disorganized.ui.alarm
+  (:require
+   ["package:pulsator/pulsator.dart" :as pulsator]
+   ["package:disorganized_notes/DateTimePicker.dart" :as dt]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   ["package:circular_countdown_timer/circular_countdown_timer.dart" :as ct]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["package:alarm/alarm.dart" :as alarm]
+   ["dart:convert" :as c]
+   ["dart:io" :refer [Platform]]
+   ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+   ["package:shared_preferences/shared_preferences.dart" :as sp]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+   ["package:carousel_slider/carousel_slider.dart" :refer [CarouselSlider CarouselOptions]]
+   ["package:disorganized_notes/IndentableListItem.dart" :refer [IndentableListItem]]
+   ["package:flutter/services.dart" :as svc]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.set :refer [union]]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:flutter/material.dart" :as m]
+   [cljd.flutter :as f]))
+
+(defn schedule-alarm [date note-id section scaffold-messenger]
+  (let [description (section "name")
+        settings (alarm/AlarmSettings
+                  .payload (prn-str
+                            {:note-id note-id
+                             :section-id (section "id")
+                             :section-position (section "section-position")})
+
+                  .androidFullScreenIntent false
+                  .id (.hashCode (section "id"))
+                  .loopAudio true
+                  .vibrate true
+                  .dateTime date
+
+                  .assetAudioPath "assets/alarm.mp3"
+
+                  .volumeSettings ^:unique (alarm/VolumeSettings.fade
+                                            .fadeDuration (Duration .seconds 10))
+
+                  .notificationSettings (alarm/NotificationSettings
+                                         .icon "assets/do_logo"
+                                         .title (section "name")
+                                         .body (or description "Alarm!")
+                                         .stopButton "Stop"))]
+    (await (alarm/Alarm.set
+            .alarmSettings settings))
+    nil))
+
+(def max-height 175)
+
+
+
+
+(defn alarm-running [duration section-id]
+  (f/widget
+   :context ctx
+   :get {{cs .-colorScheme} m/Theme}
+   :get [m/MediaQuery]
+   :watch [{:flds [alarms]} (.scheduled alarm/Alarm)]
+   :let [alarm-id (.hashCode section-id)]
+   :let [alarm (first (filter #(= alarm-id
+                                  (.-id %))
+                              (into #{} alarms)))
+         scheduled-ad (.-dateTime alarm)]
+
+   ;;This is needed because otherwise the countdown timer goes out of sync
+   ;;with the schedule when the user e.g turns the screen off/on again.
+
+   (m/ConstrainedBox
+    .constraints (m/BoxConstraints
+                  .minHeight max-height
+                  .maxHeight max-height)
+
+    .child (m/AnimatedSwitcher
+            .duration (Duration .milliseconds 300)
+            .child
+            (if alarm
+              (m/Text (str "Calling at " ))
+              (m/Text "loading"))))))
+
+(defn show [section-id section note-id]
+  (f/widget
+   :watch [{{:strs [content]} section-id}
+           (rd/subscribe [::model/current-sections])
+           scheduled? (atom nil) :as *scheduled?
+           ringing? (atom false) :as *ringing?]
+
+   :get {{tthm .-textTheme} m/Theme}
+
+   :let [alarm-id (.hashCode (section "id"))]
+   :padding {:vertical 10}
+   :context ctx
+   :get [m/ScaffoldMessenger :timeformat-24-hours?]
+   :bg-watcher ([{:flds [alarms]} (.scheduled alarm/Alarm)]
+                (let [ids (into #{} (map #(.-id %) (into #{} alarms)))]
+                  (when-let [alarm (first (filter #(= (.-id %) alarm-id)
+                                                  (into #{} alarms)))]
+                    
+                    (reset! *scheduled? (.-dateTime alarm)))))
+
+   :bg-watcher ([{:flds [alarms]} (.ringing alarm/Alarm)]
+                (let [ids (into #{} (map #(.-id %) (into #{} alarms)))]
+                  (reset! *ringing? (contains? ids alarm-id))))
+
+
+(m/AnimatedSwitcher
+     .duration (Duration .milliseconds 500)
+     .child (cond
+              scheduled?
+              (m/Column
+               .children
+               [(m/Text (str "Scheduled "
+                             (df/DateFormatter.getVerboseDateTimeRepresentation
+                              scheduled?
+                              timeformat-24-hours?))
+                        .style (.-titleLarge tthm))
+                
+                (m/SizedBox .height 10)
+                (m/ElevatedButton.icon
+                 .icon (m/Icon m/Icons.timer)
+                 .onPressed
+                 (fn []
+                   (reset! *scheduled? nil)
+                   (await (alarm/Alarm.stop alarm-id))
+                   nil)
+                 .label (m/Text "Cancel"))])
+
+              ringing? (f/widget
+                        :get {{cs .-colorScheme} m/Theme}
+                        (m/ElevatedButton.icon
+                         .style (m/ElevatedButton.styleFrom
+                                 .shape (m/RoundedRectangleBorder
+                                         .borderRadius (m/BorderRadius.circular 15))
+                                 .elevation 3)
+                         .icon (pulsator/PulseIcon
+                                .icon m/Icons.timer
+                                .pulseColor (.-onSurface cs)
+                                .pulseSize 60)
+                         .onPressed
+                         (fn []
+                           (await (alarm/Alarm.stop alarm-id))
+                           nil)
+                         .label (m/Text "Stop alarm")))
+
+              :else (m/Column
+                     .crossAxisAlignment m/CrossAxisAlignment.stretch
+                     .children
+                     [(m/OutlinedButton.icon
+                       .onPressed
+                       (fn []
+                         (model/unfocus-then-run
+
+                          ;;Without .stop the UI goes out of sync if re-running a previous alarm,
+                                        ;because it will auto stop and apparently that screws everything up.
+                          ;;not sure what's going
+                          (await (.stop alarm/Alarm alarm-id))
+                          (let [selected
+                                (await (dt/showDateTimePicker
+                                        .context ctx
+                                        .firstDate (DateTime.now)
+                                        .initialDate (DateTime.now)))]
+                            (if (.isAfter (DateTime.now) selected)
+                              (model/snackbar scaffold-messenger "You have to select a time in the future when scheduling an alarm.")
+                              (schedule-alarm selected note-id section scaffold-messenger)))
+                          (await (dutils/checkAndroidScheduleExactAlarmPermission))))
+
+                       .icon (m/Icon m/Icons.timer)
+                       .label (m/Text (if kIsWeb
+                                        "Alarm not supported on web"
+                                        "Schedule alarm")))
+                      (m/SizedBox .height 10)
+                      (f/widget
+                       :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+                       (m/Text "Alarms are local, they will not ring on other devices."
+                               .style (.merge
+                         (.-bodySmall tthm)
+                         (theme/faded-text-style brightness))))])))))
+

@@ -1,0 +1,107 @@
+(ns disorganized.ui.gps
+  (:require
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   ["dart:convert" :as c]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   ["package:flutter/material.dart" :as m]
+   ["package:geocoding/geocoding.dart" :refer [placemarkFromCoordinates]]
+   [disorganized.prettyprint :as pp]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   ["package:intl/intl.dart" :as intl :refer [NumberFormat]]
+   [cljd.flutter :as f]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   ["package:geolocator/geolocator.dart" :as geo :refer [Geolocator]]
+   [hti.re-dash.alpha :as rd]))
+
+(defn permission [scaffold-messenger]
+  (let [service-enabled? (await (Geolocator.isLocationServiceEnabled))]
+    (if (not service-enabled?)
+      (model/snackbar scaffold-messenger "Location service is not enabled, can't read position.")
+      (let [permission (await (Geolocator.checkPermission))]
+        (if (= permission geo/LocationPermission.denied)
+          (let [permission (await (Geolocator.requestPermission))]
+            (not (= permission geo/LocationPermission.denied)))
+          true)))))
+
+(defn pos->placemark [pos]
+  (await (placemarkFromCoordinates (.-latitude pos)
+                                   (.-longitude pos))))
+
+(defn position []
+  (await (Geolocator.getCurrentPosition)))
+
+(defn placemark-texts [placemark tthm]
+  (keep #(when-let [n (placemark %)]
+           (when (not (string/blank? n))
+             (f/widget
+              :padding {:bottom 4}
+              (m/SelectableText n
+                                .style (.-labelLarge tthm)))))
+        ["street"
+         "postalCode"
+         "locality"
+         "country"]))
+
+(defn show [section-id section]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [{{:strs [content]} section-id} (rd/subscribe [::model/current-sections])]
+   :managed [placemark (when (content "placemark")
+                         (model/dart->clj-ds (c/jsonDecode (content "placemark"))))
+             :dispose nil]
+   :get [:timeformat-24-hours?]
+
+   :let [latitude (content "latitude")
+         longitude (content "longitude")
+         date (content "date")]
+
+   (m/AnimatedSwitcher
+    .child
+    (if (and latitude longitude placemark)
+      (m/Column
+       .children
+       (concat
+        (placemark-texts placemark tthm)
+
+        [(m/TextButton
+          .child (m/Text (str latitude ", " longitude)
+                         .style (.-labelLarge tthm))
+          .onPressed (fn []
+                       (url/launch
+                        (str "https://www.google.com/maps/search/?api=1&query=" latitude "," longitude))
+                       nil))
+         (m/Text (str
+                  (df/DateFormatter.getVerboseDateTimeRepresentation
+                   (.toDate date)
+                   timeformat-24-hours?))
+                 .style (.-labelLarge tthm))]))
+      (m/Row
+       .children
+       [(m/Expanded
+         .child (m/OutlinedButton.icon
+                 .icon (m/Icon m/Icons.gps_fixed)
+                 .label (if kIsWeb (m/Text "Location not supported on web")
+                            (m/Text "Save location"))
+                 .onPressed (fn []
+                              (if kIsWeb
+                                (model/snackbar scaffold-messenger "Not supported on web")
+                                (let [permission (await (permission scaffold-messenger))
+                                      pos (when permission (await (position)))
+                                      placemark (when pos (first (await (pos->placemark pos))))]
+
+                                  (if placemark
+                                    (rd/dispatch [::model/update-current-note
+                                                  (fn [m]
+                                                    (update-in m [:sections section-id "content"]
+                                                               #(assoc %
+                                                                       "latitude" (.-latitude pos)
+                                                                       "longitude" (.-longitude pos)
+                                                                       "placemark" (c/jsonEncode placemark)
+                                                                       "date" (Timestamp.fromDate (DateTime.now)))))])
+                                    (model/snackbar scaffold-messenger "Something went wrong")))))))]))
+
+    .duration (Duration .milliseconds 300))))

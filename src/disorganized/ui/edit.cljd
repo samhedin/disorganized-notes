@@ -1,0 +1,1971 @@
+(ns disorganized.ui.edit
+  (:require ["package:flutter/material.dart" :as m]
+            [disorganized.textutils :refer [maintain-enumeration]]
+            [disorganized.ui.mindmap :as mindmap]
+            [disorganized.examples :as ex]
+            [disorganized.import.import :as import]
+            [disorganized.ui.gps :as gps]
+            ["package:pulsator/pulsator.dart" :as pulsator]
+            ["package:alarm/alarm.dart" :refer [Alarm]]
+            ["package:super_sliver_list/super_sliver_list.dart" :as ss]
+            ["package:flutter/services.dart" :as svc]
+            [disorganized.ui.alarm :as alarm]
+            ["package:disorganized_notes/markdowntexteditingcontroller.dart" :refer [MarkdownTextEditingController]]
+            ["package:url_launcher/url_launcher.dart" :as url]
+            [disorganized.ui.tutorial :as tutorial]
+            [disorganized.ui.timer :as timer]
+            ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions QuerySnapshot DocumentSnapshot]]
+            ["package:disorganized_notes/firestore_db.dart" :as fdb]
+            ["package:cloud_firestore/cloud_firestore.dart" :refer [Timestamp]]
+            [disorganized.ui.draw :as draw]
+            [disorganized.ui.voice :as voice]
+            ["dart:io" :refer [Platform]]
+            ["package:disorganized_notes/utils.dart" :as dutils]
+            ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
+            [cljd.flutter :as f]
+            ["package:disorganized_notes/DateFormatter.dart" :as df]
+            [disorganized.ui.theme :as theme]
+            ["package:go_router/go_router.dart" :as go_router]
+            [clojure.string :as string]
+            [disorganized.ui.media :as media]
+            [disorganized.ui.media2 :as media2]
+            [disorganized.model :as model]
+            [disorganized.ui.date :as date]
+            [disorganized.ui.list :as l]
+            [disorganized.ui.popup :as popup]
+            [disorganized.ui.table :as table]
+            [disorganized.ui.table2 :as table2]
+            [clojure.set :refer [rename-keys]]
+            [disorganized.ui.text :as t]
+            [disorganized.model :as utils]
+            ["package:awesome_notifications/awesome_notifications.dart" :as notif]
+            [hti.re-dash.alpha :as rd]))
+
+(defn decrypt-note [ctx note password navigator]
+  (if (nil? password)
+    (let [pw (await (m/showDialog
+                     .context ctx
+                     .builder
+                     (f/build
+                      :get [m/Navigator]
+                      :managed [tc (m/TextEditingController)]
+                      :get {{tthm .-textTheme} m/Theme}
+
+                      (m/AlertDialog
+                       .content
+                       (m/Column
+                        .mainAxisSize m/MainAxisSize.min
+                        .children
+                        [(m/Text "Insert password to decrypt note"
+                                 .style (.-titleLarge tthm))
+                         (m/TextField
+                          .obscureText true
+                          .controller tc)])
+
+                       .actions [(m/TextButton
+                                  .onPressed #(.pop navigator)
+                                  .child (m/Text "Cancel"))
+
+                                 (m/TextButton
+                                  .onPressed (fn []
+                                               (rd/dispatch
+                                                [::model/set-key :password (.-text tc)])
+                                               (.pop navigator (.-text tc)))
+                                  .child (m/Text "Ok"))]))))]
+      (if pw (await (model/decrypt-note note pw)) (.pop navigator)))
+
+    (await (model/decrypt-note note password))))
+
+(def list-tile (m/ListTile
+                .title (m/Text "List")
+                .leading (m/Icon m/Icons.format_list_bulleted)))
+
+(def table-tile (m/ListTile
+                 .title (m/Text "Table")
+                 .leading (m/Icon m/Icons.table_chart)))
+
+(def reminder-tile (m/ListTile
+                    .title (m/Text "Reminder")
+                    .leading (m/Icon m/Icons.access_time)))
+(def media-tile (m/ListTile
+                 .title (m/Text "Media/Draw")
+                 .leading (m/Icon m/Icons.image)))
+
+(def voice-tile (m/ListTile
+                 .title (m/Text "Voice")
+                 .leading (m/Icon m/Icons.mic)))
+(def timer-tile (m/ListTile
+                 .title (m/Text "Timer")
+                 .leading (m/Icon m/Icons.timer)))
+(def alarm-tile (m/ListTile
+                 .title (m/Text "Alarm")
+                 .leading (m/Icon m/Icons.alarm)))
+
+(defn notification-permission [ctx]
+  (when (not (await (.isNotificationAllowed (notif/AwesomeNotifications))))
+    (m/showDialog
+     .context ctx
+     .builder
+     (f/build
+      :get [m/Navigator]
+      :get {{tthm .-textTheme} m/Theme}
+
+      (m/AlertDialog
+       .content
+       (m/Column
+        .mainAxisSize m/MainAxisSize.min
+
+        .spacing 12
+        .children
+        [(m/Text "Notification permissions"
+                 .style (.-titleLarge tthm))
+
+         (m/Text "Grant notification permissions to receive reminders"
+                 .style (.-bodyLarge tthm))])
+       .actions
+       [(m/TextButton
+         .child (m/Text "Grant notification permissions")
+         .onPressed (fn []
+                      (model/request-notification-permission true)
+                      (.pop navigator)
+                      nil))
+        (m/TextButton
+         .onPressed (fn []
+                      (.pop navigator))
+         .child (m/Text "Cancel"))])))))
+
+(defn magic [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (m/TextEditingController)]
+    :watch [current-note (rd/subscribe [::model/current-note])]
+    :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+    :watch [prefs (rd/subscribe [::model/prefs])]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (concat
+       [(m/Align
+         .alignment m/Alignment.center
+         .child (m/Text "Generate a section using AI"
+                        .style (.-titleMedium tthm)))]
+
+       [(f/widget
+         :padding {:vertical 12}
+         (m/Text "This feature will share this note with a third party AI provider.
+Click Cancel if you're not cool with that."
+                 .style (.merge
+                         (.-bodySmall tthm)
+                         (theme/faded-text-style brightness))))
+        (m/TextField
+         .maxLines nil
+         .autocorrect true
+         .textCapitalization m/TextCapitalization.sentences
+         .maxLength 300
+         .decoration (m/InputDecoration
+                      .hintText "Example: Write a chickpea recipe."
+                      .hintStyle (.-bodySmall tthm))
+         .controller tc)
+        (m/Text "Select what to generate"
+                .style (.-titleMedium tthm))
+        (m/SizedBox .height 12)
+        (m/TextButton.icon
+         .onPressed (fn []
+                      (.pop navigator)
+                      (model/log-analytics "ai_gen" {"type" "table"})
+                      (rd/dispatch [::model/set-key :ai-generating-section true])
+                      (let [{:keys [columns rows text? name]} (await (table2/ai-create (.-text tc)))]
+                        (rd/dispatch
+                         [::model/update-current-note
+                          (fn [m]
+                            (let [text-section? (when text?
+                                                  (assoc (model/default-section-map
+                                                          "text"
+                                                          (count (:sections m))
+                                                          "text")
+                                                         "content" text?))
+
+                                  section (model/default-section-map
+                                           "table2"
+                                           (if text?
+                                             (inc (count (:sections m)))
+                                             (count (:sections m)))
+                                           name)
+                                  section' (assoc section
+                                                  "columns" columns
+                                                  "content" rows)
+
+                                  with-table (update m :sections
+                                                     #(assoc % (section "id") section'))]
+                              (if text-section?
+                                (update with-table :sections #(assoc % (text-section? "id") text-section?))
+                                with-table)))]))
+                      (rd/dispatch [::model/set-key :ai-generating-section false])
+                      nil)
+
+         .label (m/Text "Table & text")
+         .icon (m/Icon m/Icons.table_chart))
+
+        (m/SizedBox .height 12)
+
+        (m/TextButton.icon
+         .icon (m/Icon m/Icons.format_list_bulleted)
+
+         .onPressed (fn []
+                      (model/log-analytics "ai_gen" {"type" "list"})
+                      (rd/dispatch [::model/set-key :ai-generating-section true])
+                      (.pop navigator)
+                      (let [list (await (l/ai-create (.-text tc)))]
+                        (rd/dispatch
+                         [::model/update-current-note
+                          (fn [m]
+                            (let [section (model/default-section-map
+                                           "list"
+                                           (count (:sections m))
+                                           "list")
+
+                                  section' (assoc section "content" list)]
+                              (update m :sections
+                                      #(assoc % (section "id") section'))))]))
+                      (rd/dispatch [::model/set-key :ai-generating-section false])
+                      nil)
+
+         .label (m/Text "List"))
+
+        (m/SizedBox .height 12)
+        ;; (m/TextButton.icon
+        ;;  .icon (m/Icon m/Icons.image)
+
+        ;;  .onPressed (fn []
+        ;;               (model/snackbar scaffold-messenger "Generating, stand by...")
+        ;;               (.pop navigator)
+        ;;               (let [image (await (media2/ai-create-image (.-text tc)))]
+
+        ;;                 ))
+
+        ;;  .label (m/Text "Image"))
+        ]))
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Cancel"))]))))
+
+(defn add-section [section-type  ctx section-list-controller scroll-controller]
+  (utils/log-analytics "section_added" {"type" section-type})
+  (rd/dispatch [::model/reset-restructure-mode])
+
+  (when (and (not kIsWeb) (= section-type "reminder"))
+    (await (notification-permission ctx)))
+
+  (let [index (atom nil)]
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (let [number-of-existing-sections (count (:sections m))
+                          _ (reset! index  number-of-existing-sections)
+                          updated-name (ensure-unique-name
+                                        m
+                                        section-type number-of-existing-sections)
+
+                          section-map  (model/default-section-map section-type number-of-existing-sections updated-name)
+
+                          id (section-map "id")
+
+                          new-note (update m :sections #(assoc %
+                                                               id
+                                                               section-map))]
+                      (rd/dispatch [::model/set-key :recently-added-section id])
+
+                      (when (= "list" section-type)
+                        (rd/dispatch
+                         [::model/set-recently-added-item
+                          ((first (get-in new-note [:sections id "content"])) "id")]))
+                      new-note))])
+    
+    (Future/delayed
+     (Duration .milliseconds 50)
+     (fn []
+       (println "jumping " section-list-controller scroll-controller @index)
+       
+       (.animateToItem section-list-controller
+                    .scrollController scroll-controller
+                    .index @index
+                    .alignment 0.0
+                    .duration (fn [distance]
+                                (Duration .milliseconds (min (/ distance 2)
+                                                             1000)))
+                    .curve (fn [distance]
+                             m/Curves.easeInOut))))))
+
+(defn bindings [ctx section-menu-globalkey section-list-controller scroll-controller]
+  {(m/SingleActivator
+    svc/LogicalKeyboardKey.f1
+    .alt true)
+   (fn []
+     (m/showDialog
+      .context ctx
+      .builder
+      (f/build
+       :get [m/Navigator]
+       :get {{tthm .-textTheme} m/Theme}
+
+       (m/AlertDialog
+        .content
+        (m/Column
+         .crossAxisAlignment m/CrossAxisAlignment.start
+         .mainAxisSize m/MainAxisSize.min
+         .spacing 10
+         .children
+         [(m/Text "Shortcuts"
+                  .style (.-titleLarge tthm))
+          (m/Text "If not responding to keypresses, press tab to give the window focus"
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+f1: " "Open this view")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+t: " "Add Table")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+l: " "Add List")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+e: " "Add Text")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+r: " "Add Reminder")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+m: " "Add Media")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+v: " "Add Voice")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+i: " "Add Timer")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+a: " "Add Alarm")
+                  .style (.-bodyLarge tthm))
+
+          (m/Text (str "alt+g: " "AI Generate")
+                  .style (.-bodyLarge tthm))])
+
+        .actions [(m/TextButton
+                   .child (m/Text "Ok")
+                   .onPressed #(.pop navigator))]))))
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyS
+    .alt true)
+   (fn []
+     (.showButtonMenu (.-currentState section-menu-globalkey)))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyT
+    .alt true)
+   (fn []
+     (add-section "table2" ctx section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyL
+    .alt true)
+   (fn []
+     (add-section "list" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyE
+    .alt true)
+   (fn []
+     (add-section "text" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyR
+    .alt true)
+   (fn []
+     (add-section "reminder" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyM
+    .alt true)
+   (fn []
+     (add-section "media2" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyV
+    .alt true)
+   (fn []
+     (add-section "voice" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyI
+    .alt true)
+   (fn []
+     (add-section "timer" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyA
+    .alt true)
+   (fn []
+     (add-section "Alarm" ctx  section-list-controller scroll-controller))
+
+   (m/SingleActivator
+    svc/LogicalKeyboardKey.keyG
+    .alt true)
+   (fn []
+     (magic ctx))})
+
+(defn clone-button-onpressed [navigator m scaffold-messenger premium? ctx]
+  (model/unfocus-then-run
+   (.pop navigator)
+   (let [new-note (await (utils/clone-note m scaffold-messenger premium?))]
+     (when new-note
+       
+       (-> ctx go_router/GoRouterHelper
+           (.pushNamed  "edit"
+                        .pathParameters {"id" (:id new-note)}
+                        .extra {:autofocus false}))
+       (rd/dispatch [::model/reset-restructure-mode])
+       (rd/dispatch [::model/reset-undo-stack])
+       (rd/dispatch [::model/upload-note [new-note true]])
+       (rd/dispatch
+        [::model/set-current-note-id (:id new-note)])
+
+       (rd/dispatch [::model/set-new-plaintext (:plaintext new-note)])
+       (rd/dispatch [::model/set-key :override-title (:title new-note)])
+       (.showSnackBar scaffold-messenger
+                      (m/SnackBar
+                       .content (m/Text "Copy content from parent?")
+                       .persist false
+                       .action
+                       (m/SnackBarAction
+                        .label "Yes"
+                        .onPressed
+                        (fn []
+
+                          (let [pt
+                                (or (utils/get-new-plaintext (:plaintext m)) "")]
+                            (rd/dispatch [::model/set-new-plaintext pt])
+                            (rd/dispatch [::model/set-key :override-title (:title m)])
+                            (rd/dispatch
+                             [::model/update-current-note
+                              (fn [n]
+                                (assoc n
+                                       :title (:title m)
+                                       :sections (utils/reset-checkboxes m)
+                                       :plaintext pt))]))))))
+       nil))))
+
+(defn title-widget [plaintext-focus tc focus tutorial?]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :padding {:horizontal 12}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :bg-watcher ([focused? focus :> .-hasFocus]
+                (when (not focused?)
+                  (rd/dispatch
+                   [::model/update-current-note
+                    #(assoc % :title (string/trim (.-text tc)))])))
+   (m/TextField
+    .style (.-titleLarge tthm)
+    .decoration (m/InputDecoration
+                 .hintText (if tutorial? "Title of your first note" "Title")
+                 .hintStyle (theme/faded-text-style brightness)
+                 .border m/InputBorder.none)
+    .autocorrect true
+    .enableSuggestions true
+
+    .textCapitalization m/TextCapitalization.sentences
+    .focusNode focus
+    .maxLines 1
+    .controller tc
+    .onSubmitted (fn [text]
+                   (.requestFocus plaintext-focus)))))
+
+(defn clone-icon [tthm note]
+  (m/SliverVisibility
+   .visible (boolean (:clone-tutorial note))
+   .sliver
+   (m/SliverPadding
+    .padding (m/EdgeInsets.symmetric .vertical 10
+                                     .horizontal 10)
+    .sliver (m/SliverToBoxAdapter
+             .child (m/Column
+                     .crossAxisAlignment m/CrossAxisAlignment.start
+                     .children
+                     [(m/Text "Tutorial "
+                              .style (.-titleLarge tthm))
+                      (m/Text "Reuse the template by cloning this note"
+                              .style (.-bodyLarge tthm))
+                      (m/Row
+                       .children [(m/Text "Clone icon (top left): ")
+                                  (m/Icon m/Icons.copy_all
+                                          .size 25)])])))))
+
+(defn links [tthm]
+  (m/SliverToBoxAdapter
+   .child
+   (model/links tthm)))
+
+(defn body-widget [plaintext-tc focus tutorial?]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+
+   :managed [*prev (atom "") :dispose nil]
+   :padding {:horizontal 12}
+
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   :bg-watcher ([focused? focus :> .-hasFocus]
+
+                (when (not focused?)
+                  (rd/dispatch
+                   [::model/update-current-note
+                    #(assoc % :plaintext (string/trim (.-text plaintext-tc)))])))
+
+   (m/TextField
+    .style (.-bodyLarge tthm)
+    .focusNode focus
+    .controller plaintext-tc
+    .autocorrect true
+    .enableSuggestions true
+
+    .keyboardType m/TextInputType.multiline
+    .textAlignVertical m/TextAlignVertical.top
+    .textCapitalization m/TextCapitalization.sentences
+    .onChanged (fn [text]
+                 (maintain-enumeration text *prev plaintext-tc))
+
+    .decoration
+    (m/InputDecoration
+     .border m/InputBorder.none
+     .focusedBorder m/InputBorder.none
+     .enabledBorder m/InputBorder.none
+     .hintText (if tutorial? "Free text goes here!" "Free text")
+     .hintStyle (theme/faded-text-style brightness))
+    .onTapOutside
+    (fn [_]
+      (.unfocus (.-primaryFocus (.instance m/FocusManager))))
+    .minLines 1
+    .maxLines nil)))
+
+(defn last-updated-widget [note]
+  (f/widget
+   :get {{tthm .-textTheme} m/Theme}
+   :get [:timeformat-24-hours?]
+   :padding {:top 12
+             :bottom 12}
+   :watch [brightness (rd/subscribe [::model/get-brightness])]
+   (m/Align
+    .alignment m/Alignment.bottomLeft)
+   (m/Text (str "Updated: "
+                (df/DateFormatter.getVerboseDateTimeRepresentation
+                 (if-let
+                  [created_at (:created_at note)]
+                   (try
+                     (let [^Timestamp ca created_at]
+                       (.toLocal (.toDate ca)))
+                     (catch dynamic e
+                       (DateTime.now)))
+                   (DateTime.now))
+                 timeformat-24-hours?))
+           .style (.merge
+                   (.-bodySmall tthm)
+                   (theme/faded-text-style brightness)))))
+
+(defn reorder-sections-mode []
+  (f/widget
+   :watch [sorted-sections- (rd/subscribe [::model/current-sorted-sections])
+           sorted-sections (atom sorted-sections-) :as *sorted-sections
+           reorder-sections (rd/subscribe [::model/reorder-sections?])
+           :refresh-on sorted-sections]
+
+   (m/ReorderableListView.builder
+    .header (m/ElevatedButton.icon
+             .style (m/ElevatedButton.styleFrom
+                     .elevation 3
+                     .shape (m/RoundedRectangleBorder
+                             .borderRadius (m/BorderRadius.circular 15))
+
+                     .side (m/BorderSide
+                            .style (m/BorderStyle.none)))
+             .label (m/Text "Done")
+             .icon (m/Icon m/Icons.done)
+             .onPressed (fn []
+                          (rd/dispatch [::model/reset-restructure-mode])
+                          (rd/dispatch [::model/set-key :reorder-sections? false])))
+    .buildDefaultDragHandles false
+    ;; .onReorderStart (fn [_]
+    ;;                   (.unfocus (.-primaryFocus (.instance m/FocusManager))))
+    .shrinkWrap true
+    .itemCount (count sorted-sections)
+    .itemBuilder
+    (fn [_ index]
+      (let [[section-id section] (nth sorted-sections index)]
+        (model/log-crashlytics (str "reordering show " section-id " - " (section "type")))
+        (m/ListTile
+         .key (m/ValueKey section-id)
+         .leading  (m/ReorderableDragStartListener
+                    .key (m/ValueKey (str section-id "dragstartlistenerrrr"))
+                    .index index
+                    .child (m/Icon m/Icons.drag_indicator))
+         .title (m/Text (str (section "name") ": "
+                             (string/capitalize
+                              (str (case (section "type")
+                                     "table2" "table"
+                                     "media2" "media/draw"
+                                     (section "type")))))))))
+
+    .onReorder (fn [oldindex newindex]
+                 (move-section-index oldindex newindex *sorted-sections)))))
+
+(defn add-tag [tag]
+  (let [tag (string/trim tag)]
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (update
+                     m
+                     :tags
+                     #(let [tag (if (= \# (first tag))
+                                  (subs tag 1 (count tag))
+                                  tag)]
+
+                        (if (or ((into #{} %) tag) (string/blank? tag))
+                          %
+                          (into [] (conj % tag))))))])))
+
+(defn tags [note]
+  (f/widget
+   :watch [brightness (rd/subscribe [::model/get-brightness])
+           {:keys [all-tags]} (rd/subscribe [::model/all-tags-sub])
+           add-tag? (atom false) :as *add-tag?]
+
+   :context ctx
+   :managed [overlaycontroller (m/OverlayPortalController) :dispose nil]
+   :get {{tthm .-textTheme} m/Theme}
+   :get [:first-launch?]
+   :let [style (.merge
+                (.-bodySmall tthm)
+                (theme/faded-text-style brightness))]
+
+   (m/AnimatedSwitcher
+    .duration (Duration .milliseconds 300)
+    .child
+    (if add-tag?
+      ^#/(m/Autocomplete String)
+      (m/Autocomplete
+       .optionsViewOpenDirection m/OptionsViewOpenDirection.up
+
+       .onSelected (fn [tag]
+                     (add-tag tag)
+                     (.hide overlaycontroller)
+                     (reset! *add-tag? false))
+       .fieldViewBuilder
+       (fn [_ tc focus-node on-submitted]
+         (f/widget
+          :bg-watcher ([add-tag? *add-tag?]
+                       (when add-tag?
+                         (.requestFocus focus-node)))
+          :padding {:horizontal 20}
+
+          :bg-watcher ([focused? focus-node :> .-hasFocus]
+                       (when (not focused?)
+                         (add-tag (.-text tc))
+                         (.hide overlaycontroller)
+                         (reset! *add-tag? false)))
+          :watch [first-tag? (rd/subscribe [::model/first-tag])]
+          :managed [_ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                           (fn [_]
+                             (when (and (string/blank? (.-text tc))
+                                        (not (string/blank? first-tag?)))
+                               (.-text! tc first-tag?))
+                             nil))
+                          nil) :dispose nil]
+          (m/Align
+           .alignment m/Alignment.centerLeft)
+          (m/ConstrainedBox
+           .constraints (m/BoxConstraints
+                         .maxWidth 200))
+          (m/OverlayPortal
+           .controller overlaycontroller
+           .overlayChildBuilder (fn [_]
+                                  (m/Positioned
+                                   .bottom (if kIsWeb (+ 100
+                                                         (* (count all-tags) 25))
+                                               (+ 420
+                                                  (* (count all-tags) 25)))
+
+                                   .child
+                                   (m/Card
+                                    .elevation 4.0
+                                    .child
+                                    (model/outline
+                                     (f/widget
+                                      :padding {:horizontal 12
+                                                :vertical 12}
+                                      (if first-tag?
+                                        (m/Text "We've entered your first tag, just submit it!")
+                                        (m/Text "Tags help you find notes later.
+Writing a recipe? Add a recipe tag.")))
+                                     0.4 2 20))))
+           .child
+           (m/TextField
+            .onTapOutside (fn [_]
+                            (model/unfocus-then-run
+                             nil))
+            .controller tc
+            .focusNode focus-node
+            .decoration (m/InputDecoration
+                         .suffixIcon (m/IconButton
+                                      .icon (m/Icon m/Icons.send)
+                                      .onPressed
+                                      (fn []
+                                        (println "TAG ADDED " first-tag?)
+                                        (when first-launch?
+                                          
+                                          (utils/log-analytics "onboarding_first_tag_inserted" {})
+                                          (rd/dispatch [::model/set-key :enable-clone-highlight true]))
+
+                                        (add-tag (.-text tc))
+                                        (.hide overlaycontroller)
+                                        (reset! *add-tag? false))))
+            .onSubmitted (fn [tag]
+                           (when first-launch?
+                                          (println "setting enabel clone highlight")
+                                          (utils/log-analytics "onboarding_first_tag_inserted" {})
+                                          (rd/dispatch [::model/set-key :enable-clone-highlight true]))
+                           (add-tag tag))))))
+
+       .optionsViewBuilder (fn [ctx on-selected options]
+                             (f/widget
+                              :padding {:horizontal 0}
+                              :watch [height-factor (atom 0.0) :as *height-factor
+                                      visible? (atom true) :as *visible?]
+                              :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                                           (fn [_]
+                                             (reset! *height-factor 1.0))) :dispose nil]
+
+                              :animate [height-factor height-factor
+                                        :duration (Duration .milliseconds 150)
+                                        :curve m/Curves.ease]
+                              m/Material
+                              (m/ConstrainedBox
+                               .constraints (m/BoxConstraints .maxWidth 200
+                                                              .maxHeight 300))
+                              (m/TapRegion
+                               .onTapOutside (fn [_]
+                                               (reset! *visible? false)))
+                              (m/Visibility
+                               .visible visible?)
+                              m/Card
+                              (m/ListView.builder
+                               .shrinkWrap true
+                               .itemCount (count options)
+                               .itemBuilder (fn [_ i]
+                                              (m/ListTile
+                                               .shape (m/RoundedRectangleBorder
+                                                       .borderRadius theme/border-radius)
+                                               .title (m/Text (nth options i)
+                                                              .maxLines 1
+                                                              .overflow m/TextOverflow.ellipsis)
+                                               .onTap (fn []
+                                                        (on-selected (nth options i))))))))
+       .optionsBuilder
+       (fn [^m/TextEditingValue {:flds [text]}]
+         (let [^#/(Iterable String) result
+               (into []
+                     (filter (fn [^String x]
+                               (string/includes? x text))
+                             all-tags))]
+           result)))
+
+      (f/widget
+       :watch [notes (rd/subscribe [::model/get-notes])
+               premium? (rd/subscribe [::model/premium?])
+               prefs (rd/subscribe [::model/prefs])
+               brightness (rd/subscribe [::model/get-brightness])]
+       :managed [tutorial? (and (every? :tutorial notes)
+                                (not (:tutorial note))
+                                (seq (:sections note))
+                                (empty? (:tags note))) :dispose nil :refresh-on note]
+
+       :let [allow? (or premium? (empty? (:tags note)))]
+       :get [m/ScaffoldMessenger]
+       :get {{cs .-colorScheme} m/Theme}
+
+       (m/Row
+        .children
+        (concat
+         [(let [button (m/SizedBox
+                        .width 145
+                        .child (m/ElevatedButton.icon
+                                .label (m/Text "Tags")
+                                .icon
+                                (m/Icon (if allow?
+                                          m/Icons.tag
+                                          m/Icons.star_outline))
+
+                                .onPressed (fn []
+                                             (if allow?
+                                               (do
+                                                 (when (and (empty? (:tags note))
+
+                                                            (every? :tutorial notes))
+                                                   (.show overlaycontroller))
+                                                 (swap! *add-tag? not))
+                                               (model/prompt-to-paywall scaffold-messenger "More than one tag requires premium"))
+                                             nil)))]
+            (if tutorial?
+              (model/outline button)  ;(model/outline section 0 2)
+              button))]
+
+         (when (seq (:tags note))
+           (mapv #(m/TextButton
+                   .onPressed (fn []
+                                (popup/confirm
+                                 ctx
+                                 (str "Delete tag " % "?")
+                                 (fn []
+                                   (rd/dispatch
+                                    [::model/update-current-note
+                                     (fn [m]
+                                       (update m :tags
+                                               (fn [tags]
+                                                 (into [] (filter (fn [tag]
+                                                                    (not= tag %))) tags))))]))))
+                   .child (m/Text %
+                                  .style style)) (:tags note))))))))))
+
+(defn show-section [section-id restructure-mode note-id section tutorial? *section-size section-name text-search type]
+  (f/widget
+   :key (str section-id restructure-mode "main-view")
+   :bind {:section-id section-id
+          :section section
+          :section-name section-name}
+   :padding {:top 12}
+   :watch [{:strs [sections-start-expanded]} (rd/subscribe [::model/get-user-options])]
+   :get [m/Theme :first-launch?]
+   (m/Card
+    .elevation 0.0)
+   (m/Theme
+    .data (.copyWith theme .dividerColor m/Colors.transparent)
+    .child
+    (m/ExpansionTile
+     .tilePadding m/EdgeInsets.zero
+     .initiallyExpanded (if (nil? sections-start-expanded)
+                          true
+                          sections-start-expanded)
+
+     .showTrailingIcon false
+     .title  (section-header
+              note-id
+              section-id
+              section
+              tutorial?
+              *section-size)
+     .children
+     [(f/widget
+       :padding {:horizontal 8
+                 :bottom 12}
+       (condp = type
+         "text" (t/show section-id)
+         "table" (table/show (section "id"))
+         "table2" (table2/show (section "id")
+                               text-search)
+         "alarm" (alarm/show section-id section note-id)
+         "location" (gps/show section-id section)
+         "mindmap" (mindmap/show section-id)
+         "timer" (timer/show section-id section)
+         "draw" (draw/show section-id section)
+         "list" (l/showlist section-id text-search)
+         "reminder" (date/show section-id)
+         "media" (media/show section-id)
+         "media2" (media2/show section-id)
+
+         "voice" (voice/show section-id note-id section-name)
+         nil (assert false
+                     (str "type was nil for " section))))]))))
+
+;; (defn add-section-button [note section-menu-globalkey]
+;;   (f/widget
+;;    :watch [premium? (rd/subscribe [::model/premium?])
+;;            saved-notes (rd/subscribe [::model/get-notes])]
+;;    :get [m/ScaffoldMessenger]
+;;    :get {{cs .-colorScheme} m/Theme}
+
+;;    :context ctx
+;;    :padding {:top 24
+;;              :bottom (if kIsWeb 4 0)}
+;;    (m/Align
+;;     .alignment m/Alignment.bottomLeft)
+;;    (m/MenuAnchor
+;;     .builder (fn [ctx controller menuChildren]
+;;                (m/ElevatedButton.icon
+;;                 .icon (m/Icon m/Icons.post_add)
+;;                 .label (m/Text (if (>= (count saved-notes) 3)
+;;                                  "Sections"
+;;                                  "Build with sections"))
+;;                 .onPressed (fn []
+;;                              (if (.-isOpen controller)
+;;                                (.close controller)
+;;                                (.open controller)))))
+
+;;     .menuChildren [(m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (magic ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "AI generate table/list")
+;;                             .leading (m/Icon m/Icons.auto_awesome)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "list" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "List")
+;;                             .leading (m/Icon m/Icons.format_list_bulleted)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "table2" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Table")
+;;                             .leading (m/Icon m/Icons.table_chart)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "text" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Text")
+;;                             .leading (m/Icon m/Icons.text_fields)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "reminder" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Reminder")
+;;                             .leading (m/Icon m/Icons.access_time)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "media2" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Media")
+;;                             .leading (m/Icon m/Icons.image)))
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "voice" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Voice")
+;;                             .leading (m/Icon m/Icons.mic)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "draw" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Draw")
+;;                             .leading (m/Icon m/Icons.draw)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "timer" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Timer")
+;;                             .leading (m/Icon m/Icons.timer)))
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "alarm" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Alarm")
+;;                             .leading (m/Icon m/Icons.alarm)))
+
+;;                    (m/MenuItemButton
+;;                     .onPressed (fn []
+;;                                  (model/unfocus-then-run
+;;                                   (rd/dispatch [::model/reset-restructure-mode])
+;;                                   (add-section "location" ctx)))
+
+;;                     .child (m/ListTile
+;;                             .title (m/Text "Location")
+;;                             .leading (m/Icon m/Icons.gps_fixed)))])))
+
+(def ^#/(List m/PopupMenuEntry) add-section-itembuilder (fn [_]
+                                                          #dart ^m/PopupMenuEntry
+                                                          [(m/PopupMenuItem
+                                                            .value "ai-gen"
+                                                            .child (m/ListTile
+                                                                    .title (m/Text "AI generate section")
+                                                                    .leading (m/Icon m/Icons.auto_awesome)))
+
+                                                           (m/PopupMenuItem
+                                                            .value "list"
+                                                            .child
+                                                            list-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "table2"
+                                                            .child table-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "text"
+                                                            .child (m/ListTile
+                                                                    .title (m/Text "Text")
+                                                                    .leading (m/Icon m/Icons.text_fields)))
+
+                                                           (m/PopupMenuItem
+                                                            .value "reminder"
+                                                            .child reminder-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "media2"
+                                                            .child media-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "voice"
+                                                            .child voice-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "timer"
+                                                            .child timer-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "alarm"
+                                                            .child alarm-tile)
+
+                                                           (m/PopupMenuItem
+                                                            .value "location"
+                                                            .child (m/ListTile
+                                                                    .title (m/Text "Location")
+                                                                    .leading (m/Icon m/Icons.gps_fixed)))
+
+                                                           (m/PopupMenuItem
+                                                            .value "mindmap"
+                                                            .child (m/ListTile
+                                                                    .title (m/Text "Mindmap (beta)")
+                                                                    .leading (m/Icon m/Icons.hub)))]))
+(defn add-section-button [note section-menu-globalkey section-list-controller scroll-controller]
+  (f/widget
+   :watch [premium? (rd/subscribe [::model/premium?])
+           saved-notes (rd/subscribe [::model/get-notes])
+           onboarding-section (rd/subscribe [::model/onboarding-section])]
+
+   :managed [overlaycontroller (m/OverlayPortalController) :dispose nil
+             tutorial? (and (every? :tutorial saved-notes)
+                            (empty? (note :sections))
+
+                            ;;Include these if the user should input text first.
+                            ;; (or (not (string/blank? (:plaintext note)))
+                            ;;     (not (string/blank? (:title note))))
+                            )
+             :dispose nil :refresh-on [note]]
+   :get [m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+   :let [allow? (or premium? (<= (count (:sections note)) 1))]
+   :context ctx
+
+   :get {{cs .-colorScheme} m/Theme}
+   :padding {:top 24
+             :bottom (if kIsWeb 4 0)}
+   (m/Align
+    .alignment m/Alignment.bottomLeft)
+   (let [popupmenu (m/PopupMenuButton
+                    .constraints (m/BoxConstraints
+                                  .maxHeight (if tutorial? 400 500))
+                    .clipBehavior m/Clip.antiAlias
+                    .key section-menu-globalkey
+                    .child
+                    (m/SizedBox
+                     .width 145
+                     .child (m/ElevatedButton.icon
+                             .icon (m/Icon (if allow?
+                                             m/Icons.post_add
+                                             m/Icons.star_outline))
+
+                             .label (m/OverlayPortal
+                                     .controller overlaycontroller
+                                     .overlayChildBuilder
+                                     (fn [_]
+                                       (m/Positioned
+                                        .bottom 470
+                                        .child
+                                        (m/Card
+                                         .elevation 4.0
+                                         .child
+                                         (model/outline
+                                          (f/widget
+                                           :padding {:vertical 12
+                                                     :horizontal 12}
+                                           :get [m/MediaQuery]
+                                           (m/SizedBox
+                                            .width (- (.-width (.-size media-query))
+                                                      100))
+
+                                           m/Column
+                                           .children
+                                           (concat
+                                            [(m/Align
+                                              .alignment m/Alignment.bottomLeft
+                                              .child (m/Text (if onboarding-section
+                                                               "Add your section!"
+                                                               "Build your notes with sections, select one to try!")
+                                                             .style (.-bodyLarge tthm)))]))
+                                          0.1 2 20))))
+                                     .child (m/Text "Sections"))
+                             .onPressed (fn []
+                                          (when tutorial?
+                                            (utils/log-analytics "onboarding_sections_displayed" {})
+                                            (.show overlaycontroller))
+
+                                          (if allow?
+                                            (.showButtonMenu (.-currentState section-menu-globalkey))
+                                            (model/prompt-to-paywall scaffold-messenger "More than two sections requires premium")))))
+                    .itemBuilder add-section-itembuilder
+                    .onCanceled (fn []
+                                  (.hide overlaycontroller))
+
+                    .onSelected (fn [selected]
+                                  (.hide overlaycontroller)
+                                  (when onboarding-section
+                                    (utils/log-analytics "onboarding_section_selected" {"section" selected})
+                                    (rd/dispatch [::model/set-key :onboarding-section nil]))
+
+                                  (model/unfocus-then-run
+                                   (rd/dispatch [::model/reset-restructure-mode])
+                                   (cond
+                                        ; (and premium? (= "ai-gen" selected)) (magic ctx)
+                                        ; (= "ai-gen" selected) (model/paywall scaffold-messenger)
+                                     (= "ai-gen" selected) (magic ctx)
+                                     :else (add-section selected ctx section-list-controller scroll-controller)))))]
+     (if tutorial?
+       (model/outline popupmenu 0.8 5 20)
+       popupmenu))))
+
+(defn appbar-icon [child]
+  (f/widget
+   :get [:*expanded-searchbar]
+   (m/Visibility
+    .visible (not @*expanded-searchbar))
+   (m/Flexible
+    .child
+    child)))
+
+(defn table-of-content []
+  (f/widget
+   :watch [sections (rd/subscribe [::model/current-sections])]
+   :get [:*expanded-searchbar
+         :section-list-controller
+         :scroll-controller]
+
+   :get {{cs .-colorScheme} m/Theme}
+   (m/Visibility
+    .visible (and (< 1 (count sections))
+                  (not @*expanded-searchbar))
+    .child
+    (m/PopupMenuButton
+     .tooltip "Jump to section"
+     .icon (m/Icon m/Icons.toc
+                   .color (.-onSurfaceVariant cs))
+     .itemBuilder
+     (fn [_]
+       (let [^#/(List m/PopupMenuItem) s
+             (mapv
+              (fn [[id {:strs [name type]}]]
+                (let [presented-type  (string/capitalize
+                                       (str (case type
+                                              "table2" "table"
+                                              "media2" "media"
+                                              type)))]
+                  (m/PopupMenuItem
+                   .value id
+                   .child (m/Text
+                           (if (or (= name type)
+                                   ;;If the name is e.g "list1" 
+                                   (= (subs name 0 (dec (count name)))
+                                      presented-type))
+                             name
+                             (str name ": " presented-type))))))
+
+              (sort-by (fn [[_ {:strs [section-position]}]]
+                         section-position)
+                       sections))]
+         s))
+     .onSelected (fn [s]
+
+                   (let [section (second (first (filter (fn [[section-id _]]
+                                                          (= s section-id)) sections)))
+
+                         index (section "section-position")]
+                     (println "jumping to " index)
+                     (.jumpToItem
+                      section-list-controller
+                      .scrollController scroll-controller
+                      .index index
+                      .alignment 0.0)))))))
+
+(defn tag-at-pos [text pos]
+  (when (and (>= pos 0) (<= pos (count text)))
+    (let [;; Find the start of the current word
+          word-start (loop [i (dec pos)]
+                       (cond
+                         (< i 0) 0
+                         (re-matches #"[a-zA-Z0-9#_-]" (str (get text i))) (recur (dec i))
+                         :else (inc i)))
+          ;; Find the end of the current word
+          word-end (loop [i pos]
+                     (cond
+                       (>= i (count text)) (count text)
+                       (re-matches #"[a-zA-Z0-9#_-]" (str (get text i))) (recur (inc i))
+                       :else i))
+          ;; Extract the current word
+          current-word (subs text word-start word-end)]
+      ;; Only return if it's a valid tag - using the same pattern as the regex function
+      (when (re-matches #"#[a-zA-Z0-9_-]+" current-word)
+        {:tag current-word
+         :tag-start word-start
+         :tag-end word-end}))))
+
+(defn ensure-unique-name [note name count]
+  (let [name (case name
+               "table2" "table"
+               "media2" "media"
+               name)]
+    (if (contains? (:sections note) name)
+      (str name count)
+      name)))
+
+(defn rename-section
+  [section-id section-name ^m/TextEditingController tc]
+  (println "renaming to " (.-text tc))
+  (let [newn (.-text tc)]
+    (if (string/blank? newn)
+      (.-text! tc section-name)
+      (rd/dispatch [::model/update-current-note
+                    (fn [m]
+                      (assoc-in m [:sections section-id "name"] newn))])))
+  nil)
+
+;; (defn default-section-properties [{:keys [section-id]} section note-id *section-size]
+;;   (f/widget
+;;    :get {{cs .-colorScheme} m/Theme}
+;;    :context ctx
+;;    :get [m/ScaffoldMessenger]
+
+;;    (m/Tooltip
+;;     .message "Section settings"
+;;     .child
+;;     (m/MenuAnchor
+;;      .builder (fn [ctx controller menuChildren]
+;;                 (m/IconButton
+;;                  .onPressed (fn []
+;;                               (if (.-isOpen controller)
+;;                                 (.close controller)
+;;                                 (.open controller)))
+;;                  .icon (m/Icon m/Icons.more_vert
+;;                                .color (.-onSurfaceVariant cs))))
+
+;;      .menuChildren [(m/MenuItemButton
+;;                      .onPressed (fn []
+;;                                   (popup/delete-section
+;;                                    ctx
+;;                                    note-id
+;;                                    section-id
+;;                                    app-localizations
+;;                                    section
+;;                                    *section-size))
+;;                      .child (m/ListTile
+;;                              .title (m/Text "Delete section")))]))))
+
+(defn default-section-properties [{:keys [section-id]} section note-id *section-size]
+  (f/widget
+   :get {{cs .-colorScheme} m/Theme}
+   :context ctx
+   :get [m/ScaffoldMessenger]
+
+   (m/Tooltip
+    .message "Section settings"
+    .child
+    (m/PopupMenuButton
+     .clipBehavior m/Clip.antiAlias
+     .itemBuilder (fn [_]
+                    #dart ^m/PopupMenuEntry
+                     [(m/PopupMenuItem
+                       .value "delete"
+                       .child (m/Text "Delete section"))])
+     .onSelected (fn [selection]
+                   (case selection
+                     "delete" (popup/delete-section
+                               ctx
+                               note-id
+                               section-id
+                               section
+                               *section-size)))))))
+
+(defn list-siblings [section-id section  premium? note-id restructure-mode? input *section-size]
+  (concat
+   (when (and (not kIsWeb) Platform.isAndroid restructure-mode?)
+     [(f/widget
+       :context ctx
+       (m/IconButton
+        .icon (m/Icon m/Icons.widgets)
+        .onPressed
+        (fn []
+          (l/set-home-screen-widget ctx  note-id section))))])
+
+   (when restructure-mode?
+     [(f/widget
+       :get [m/ScaffoldMessenger]
+
+       (m/IconButton
+        .onPressed (fn []
+                     (.showSnackBar scaffold-messenger
+                                    (m/SnackBar .content
+                                                (m/Text (str "Checkboxes"
+                                                             (if (section "checkboxes-visible") " off" " on")))))
+                     (l/toggle-checkbox-visibility section-id)
+                     nil)
+        .icon (m/Icon (if (section "checkboxes-visible")
+                        m/Icons.check_box_outline_blank
+                        m/Icons.check_box_outlined))))])
+
+   [(default-section-properties input section note-id *section-size)]))
+
+(defn section-header-siblings [section  premium? note-id restructure-mode? *section-size]
+  (let [id (section "id")
+        input {:section-id id
+               :name (section "name")
+               :section-index (section "section-position")}]
+    (case (section "type")
+
+      "list" (l/properties note-id section *section-size)
+      "table2" (table2/properties note-id section *section-size)
+      "text" (t/properties note-id section *section-size)
+
+      [(default-section-properties input section note-id *section-size)])))
+
+(defn move-section-index [old-idx new-idx *sorted-sections]
+  (let [sorted-sections
+        (into []
+              (sort-by (fn [[_ {:strs [section-position]}]]
+                         section-position)
+                       @*sorted-sections))
+
+        new-sections (utils/vec-move
+                      sorted-sections
+                      old-idx
+                      (if (< old-idx new-idx)
+                        (dec new-idx)
+                        new-idx))
+        final-sections (into {}
+                             (map-indexed
+                              (fn [i [section-name section]]
+                                [section-name (assoc section "section-position" i)])
+                              new-sections))]
+    (reset! *sorted-sections final-sections)
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+        (assoc m :sections final-sections))])))
+
+(defn section-header [note-id
+                      section-id
+                      section
+                      tutorial?
+                      *section-size]
+  (f/widget
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+   :managed [tc (m/TextEditingController)
+             focus-node (m/FocusNode)
+             _ (do (m/WidgetsBinding.instance.endOfFrame.then
+                    (fn [_]
+                      (when (string/blank? (.-text tc))
+                        (.-text! tc (section "name"))))))
+             :dispose nil]
+   :watch [restructure-mode? (rd/subscribe [::model/get-restructure-mode section-id])]
+
+   :watch [invalid (atom nil) :as *invalid
+           restructure-mode? (rd/subscribe [::model/get-restructure-mode section-id])
+           premium? (rd/subscribe [::model/premium?])]
+   :padding {:horizontal 12} ;;to align with title and body
+
+   :bg-watcher ([focused? focus-node :> .-hasFocus]
+                (when focused?
+                  (.-selection! tc (m/TextSelection
+                                    .baseOffset 0
+                                    .extentOffset (count (.-text tc)))))
+
+                (when (and (not invalid) (not focused?))
+                  (rename-section section-id (section "name") tc)))
+
+   (m/Row
+    .mainAxisAlignment m/MainAxisAlignment.start
+    .children
+    (concat
+     (when (not restructure-mode?)
+       [(m/IntrinsicWidth
+         .child
+         (m/TextField
+          .maxLines 1
+          .controller tc
+          .textCapitalization m/TextCapitalization.sentences
+          .focusNode focus-node
+          .style (.-titleLarge tthm)
+          .onChanged
+          (fn [text]
+            (rd/dispatch
+             [::model/update-current-note
+              (fn [m]
+                (reset! *invalid
+                        (cond
+                          (and
+                           (get-in m [:sections text])
+                           (not= text (section "name"))) "Not unique"
+                          (string/blank? text) "Not filled"
+                          (< 30 (count text)) "Too long"
+                          :else nil))
+                m)]))
+
+          .onSubmitted
+          (fn [_]
+            (when (not invalid)
+              (.unfocus (.-primaryFocus (.instance m/FocusManager)))))
+
+          .decoration (if invalid
+                        (m/InputDecoration
+                         .errorText invalid
+
+                         .border (m/OutlineInputBorder))
+                        (m/InputDecoration
+                         .border m/InputBorder.none))))])
+     [(f/widget
+       (m/Visibility
+        .visible (or restructure-mode? false)
+        .child
+        (m/IconButton
+         .onPressed
+         (fn []
+           (popup/delete-section
+            ctx
+            note-id
+            section-id
+            section
+            *section-size))
+         .icon (m/Icon m/Icons.delete))))
+      (m/Spacer)]
+
+     (section-header-siblings  section   premium? note-id restructure-mode? *section-size)))))
+
+(defn show-sections [note-id tutorial? text-search sorted-sections section-list-controller]
+  (ss/SuperSliverList
+   .listController section-list-controller
+   .delegate
+   (let [all-sections
+         (into []
+               (keep
+                (fn [[section-id section]]
+                  (let [type (section "type")
+                        section-name- (section "name")]
+                    (when (or (string/blank? text-search)
+                              (string/includes? (string/lower-case (str section))
+                                                text-search))
+                      (f/widget
+                       :watch [recently-added-section (rd/subscribe [::model/recently-added-section])
+                               section-size (atom
+                                             (if (= recently-added-section section-id) 0 100)) :as *section-size
+                               restructure-mode (rd/subscribe [::model/get-restructure-mode section-id])]
+
+                       :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                                    (fn [_]
+                                      (reset! *section-size 100)))
+                                 :dispose nil]
+
+                       :animate [size section-size
+                                 :duration (Duration .milliseconds 200)
+                                 :curve m/Curves.easeIn]
+                       :managed [section-widget
+                                 (show-section section-id restructure-mode  note-id section tutorial? *section-size (section "name") text-search type)
+                                 :dispose nil :refresh-on section]
+
+                       m/ClipRect
+                       (m/Align
+                        .heightFactor (/ size 100))
+
+                       (m/AnimatedCrossFade
+                        .crossFadeState (if restructure-mode
+                                          m/CrossFadeState.showFirst
+                                          m/CrossFadeState.showSecond)
+                        .sizeCurve m/Curves.ease
+                        .duration (Duration .milliseconds 250)
+                        ;;The subwidgets in the section widgets
+                        ;;switch based on restructure mode
+                        ;;so this works even if it looks weird.
+                        .secondChild section-widget
+                        .firstChild section-widget)))))
+                sorted-sections))]
+     (m/SliverChildBuilderDelegate
+      (fn [_ i]
+        (nth all-sections i))
+      .childCount (count all-sections)))))
+
+(defn clone-note-button [plaintext-tc cloning-expanded?]
+  (f/widget
+   :get [m/ScaffoldMessenger m/Navigator]
+   :watch [m (rd/subscribe [::model/current-note])
+           premium? (rd/subscribe [::model/premium?])
+           notes (rd/subscribe [::model/get-notes])
+           prefs (rd/subscribe [::model/prefs])
+           brightness (rd/subscribe [::model/get-brightness])
+           enable-clone-highlight? (rd/subscribe [::model/enable-clone-highlight])]
+   :get {{cs .-colorScheme} m/Theme}
+   :context ctx
+   :get {{tthm .-textTheme} m/Theme}
+
+   :managed [controller (m/OverlayPortalController) :dispose nil]
+
+   :bg-watcher ([enable-clone-highlight? (rd/subscribe [::model/enable-clone-highlight])]
+                (println "enable clone highlight " enable-clone-highlight?)
+                (if enable-clone-highlight?
+                  (.show controller)
+                  (.hide controller)))
+   (m/TextButton
+    .onPressed
+    (fn []
+      (clone-button-onpressed navigator m scaffold-messenger premium? ctx)
+      nil)
+
+    .child
+    (m/OverlayPortal
+     .controller controller
+     .overlayChildBuilder
+     (fn [_]
+       (m/Positioned
+        .top 100
+        .child
+        (m/Card
+         .elevation 4.0
+         .child
+         (model/outline
+          (f/widget
+           :padding {:vertical 12
+                     :horizontal 12}
+           :get [m/MediaQuery]
+           (m/SizedBox
+            .width (- (.-width (.-size media-query))
+                      100))
+
+           m/Column
+           .children
+           (concat
+            [(m/Text
+              "Clone for reuse"
+              .style (.-titleLarge tthm))
+             (m/SizedBox .height 12)
+             (m/Align
+              .alignment m/Alignment.bottomLeft
+              .child (m/Text "Clone to create a similar note."
+                             .style (.-bodyLarge tthm)))
+             (m/Align
+              .alignment m/Alignment.bottomRight
+              .child (m/TextButton
+                      .onPressed (fn []
+                                   (rd/dispatch [::model/set-key :enable-clone-highlight nil]))
+                      .child (m/Text "Hide")))]))
+          0.1 2 20))))
+     .child
+     (if enable-clone-highlight?
+       (model/outline
+        (f/widget
+         :padding {:horizontal 4
+                   :vertical 4}
+         (m/Icon m/Icons.copy_all .color (.-onSurfaceVariant cs)
+                 .size 24))
+        1 2 40)
+
+       (m/Icon m/Icons.copy_all .color (.-onSurfaceVariant cs)
+               .size 24))))))
+
+(defn in-note-search [*text-search]
+  (f/widget
+   :managed [tc (m/TextEditingController)]
+   :get {{cs .-colorScheme} m/Theme}
+
+   :get [:*expanded-searchbar]
+   (m/AnimatedSwitcher
+    .duration (Duration .milliseconds 300)
+    .child (if @*expanded-searchbar
+             (m/SearchBar
+              .controller tc
+              .elevation (m/MaterialStateProperty.all 0.0)
+              .autoFocus true
+              .hintText "Find in sections"
+              .leading (m/IconButton
+                        .icon (m/Icon m/Icons.arrow_left)
+                        .onPressed
+                        (fn []
+                          (.-text! tc "")
+                          (reset! *text-search "")
+                          (swap! *expanded-searchbar not)))
+
+              .trailing [(m/IconButton
+                          .onPressed
+                          (fn []
+                            (.-text! tc "")
+                            (reset! *text-search "")
+                            nil)
+                          .icon (m/Icon m/Icons.clear))]
+
+              .constraints (m/BoxConstraints
+                            .maxWidth 350)
+
+              .onChanged (fn [text]
+                           (reset! *text-search text)
+                           (when (= "" text)
+                             (swap! *expanded-searchbar not))))
+             (m/IconButton
+              .icon (m/Icon m/Icons.search
+                            .color (.-onSurfaceVariant cs))
+              .onPressed (fn []
+                           (swap! *expanded-searchbar not)))))))
+
+(defn appbar-add-section [note premium? section-list-controller scroll-controller]
+  (f/widget
+   :managed [gk (m/GlobalKey) :dispose nil]
+   :let [allow? (or premium? (<= (count (:sections note)) 1))]
+   :get [m/ScaffoldMessenger]
+   :context ctx
+   (m/PopupMenuButton
+    .tooltip "Add section"
+    .key gk
+    .child
+    (m/IconButton
+             .icon (m/Icon (if allow?
+                             m/Icons.post_add
+                             m/Icons.star_outline))
+
+             .onPressed (fn []
+                          (if allow?
+                            (.showButtonMenu (.-currentState gk))
+                            (model/prompt-to-paywall scaffold-messenger "More than two sections requires premium"))))
+    .itemBuilder add-section-itembuilder
+
+    .onSelected (fn [selected]
+                  
+                  (model/unfocus-then-run
+                   (rd/dispatch [::model/reset-restructure-mode])
+                   (cond
+                                        ; (and premium? (= "ai-gen" selected)) (magic ctx)
+                                        ; (= "ai-gen" selected) (model/paywall scaffold-messenger)
+                     (= "ai-gen" selected) (magic ctx)
+                     :else (add-section selected ctx section-list-controller scroll-controller)))))))
+
+(defn appbar [plaintext-tc  *text-search cloning-expanded? first-launch? old-note? ]
+  (m/AppBar
+   .leading
+   (f/widget
+    :context ctx
+    :get [:*expanded-searchbar]
+    :get [m/Navigator m/ScaffoldMessenger]
+    :watch [notes (rd/subscribe [::model/get-notes])
+            note (rd/subscribe [::model/current-note])
+            enable-clone-highlight? (rd/subscribe [::model/enable-clone-highlight])]
+    :get {{cs .-colorScheme} m/Theme}
+    (m/Visibility
+     .visible (not @*expanded-searchbar))
+    (m/Tooltip
+     
+     .message "Go back (notes are autosaved)")
+    (m/IconButton
+     .icon
+     (if (and
+          (nil? enable-clone-highlight?)
+          first-launch?
+          (every? :tutorial notes)
+          (seq (:tags note))
+          (seq (:sections note)))
+       (model/outline (m/Icon m/Icons.arrow_back
+                              .color (.-onSurfaceVariant cs))
+                      0.5 2 10)
+       (m/Icon m/Icons.arrow_back
+               .color (.-onSurfaceVariant cs)))
+     .onPressed
+     (fn []
+       (.pop navigator)
+       (model/exit-edit-note scaffold-messenger old-note?))))
+
+   .title
+   (m/Tooltip
+    .message "Clone to re-use sections"
+    .child (clone-note-button plaintext-tc cloning-expanded?))
+
+   .actions
+   [(f/widget
+     :watch [note (rd/subscribe [::model/current-note])
+             premium? (rd/subscribe [::model/premium?])]
+     :get [:section-list-controller :scroll-controller :*expanded-searchbar]
+     (m/Visibility
+      .visible (not @*expanded-searchbar)
+      .child (appbar-add-section note premium? section-list-controller scroll-controller)))
+    
+    (f/widget
+     :watch [sections (rd/subscribe [::model/current-sections])]
+     (m/Tooltip
+      .message "Search in sections")
+     (m/Visibility
+      .visible (<= 1 (count sections)))
+
+     (in-note-search *text-search))
+
+    (table-of-content)
+
+    (m/Flexible
+     .child
+     (f/widget
+      :padding {:right 12}
+      :get [:*expanded-searchbar]
+      (m/Visibility
+       .visible (not @*expanded-searchbar))
+      (popup/properties-menu)))]))
+
+(defn edit [current-id {:keys [jumpto autofocus? first-launch? old-note?]}]
+  (f/widget
+   :managed [plaintext-tc (MarkdownTextEditingController)
+             title-tc (m/TextEditingController)
+             section-list-controller (ss/ListController)
+             scroll-controller (m/ScrollController)
+             section-menu-globalkey (m/GlobalKey) :dispose nil]
+
+   :watch [text-search (atom "") :as *text-search]
+   :watch [expanded-searchbar? (atom false) :as *expanded-searchbar
+           premium? (rd/subscribe [::model/premium?])
+           ai-generating? (rd/subscribe [::model/ai-generating?])
+           cloning-expanded? (atom false) :as *cloning-expanded?]
+   :bind {:*text-search *text-search
+          :text-search text-search
+          :first-launch? first-launch?
+          :*expanded-searchbar *expanded-searchbar
+          :section-list-controller section-list-controller
+          :scroll-controller scroll-controller}
+   :context ctx
+   :get [m/Navigator m/ScaffoldMessenger]
+   :get {{cs .-colorScheme} m/Theme}
+   ;; (m/GridPaper
+   ;;  .color m/Colors.red
+   ;;  .interval 100
+   ;;  .divisions 1)
+   (m/CallbackShortcuts
+    .bindings (bindings ctx section-menu-globalkey section-list-controller scroll-controller))
+   (m/Focus
+    .autofocus true)
+   (m/PopScope
+    .canPop true
+    .onPopInvokedWithResult
+    (fn [_ _]
+      (when first-launch?
+        (await (tutorial/schedule-habit-reminders))
+
+        (when (= "true" (model/remote-conf "onboarding_show_note_selector"))
+          (-> ctx go_router/GoRouterHelper
+              (.goNamed "note-selector"))))
+
+      (model/exit-edit-note scaffold-messenger old-note?)))
+
+   (m/Scaffold
+    .appBar (appbar plaintext-tc  *text-search cloning-expanded? first-launch? old-note?)
+    .body
+
+    (m/SafeArea
+     .child
+     (f/widget
+      :context ctx
+      :watch [password (rd/subscribe [::model/password])]
+      :get [m/ModalRoute]
+      :bg-watcher ([snapshot (try (when-let [id (or current-id
+                                                    (:id old-note?))]
+                                    (.snapshots
+                                     (.doc
+                                      (.collection FirebaseFirestore.instance "notes2")
+                                      id)))
+                                  (catch Exception e nil))]
+                   (when snapshot
+                     (let [note (into {} (for [[k v]
+                                               (model/firestore-stream->map snapshot)]
+                                           [(keyword k) v]))]
+                       
+                       (when (and (:plaintext note)
+                                  (.-isCurrent modal-route))
+                         (if (:encrypted note)
+                           (when-let [note (await (decrypt-note ctx note password navigator))]
+                             (rd/dispatch [::model/set-current-note-local note]))
+
+                           (rd/dispatch [::model/set-current-note-local note])))
+
+                       (when (string/blank? (.-text plaintext-tc))
+                         (.-text! plaintext-tc (or (:plaintext note) ""))))))
+
+      :watch [note (rd/subscribe [::model/current-note])]
+
+      :managed [focus (m/FocusNode)
+                title-focus (m/FocusNode)
+                _ (do (m/WidgetsBinding.instance.addPostFrameCallback
+                       (fn [_]
+                         (when jumpto
+                           (.jumpToItem section-list-controller
+                                        .scrollController scroll-controller
+                                        .index jumpto
+                                        .alignment 1.0))
+
+                         (when (not= (.-text plaintext-tc) (str (:plaintext note)))
+                           (.-text! plaintext-tc (str (:plaintext note))))
+
+                         (when (not= (.-text title-tc) (str (:title note)))
+                           (.-text! title-tc (str (:title note))))
+
+                         nil))
+                      nil) :dispose nil]
+
+      :get [m/ScaffoldMessenger]
+      :context ctx
+      :get {{tthm .-textTheme} m/Theme}
+
+      :bg-watcher ([autofocus? (rd/subscribe [::model/focus-plaintext?])]
+                   (when autofocus?
+                     (.requestFocus title-focus)
+                     (rd/dispatch [::model/set-key :focus-plaintext? nil])))
+
+      :get [m/Navigator]
+      :watch [sorted-sections (rd/subscribe [::model/current-sorted-sections])
+              notes (rd/subscribe [::model/get-notes])]
+
+      ;;Watch out, this won't be cleared when switching notes
+      ;;but for the use of it that's ok. Just be careful when relying on it for future functionality.
+
+      :watch [prefs (rd/subscribe [::model/prefs])]
+
+      :watch [hide-vid-tutorial? (atom (or (prefs "tutorial_edit") false)) :as *svt?
+              section-expanded?
+              (atom false) :as *section-expanded?]
+
+      ;;Sometimse the previously visited note is still loaded before the current note has been synced, so don't show the old note.
+      (if (or (not= (:id note) current-id)
+              (nil? note))
+        (f/widget
+         :padding {:horizontal 20}
+         m/Center
+         (m/Container
+          .width 400
+          .child (m/LinearProgressIndicator)))
+
+        (f/widget
+         :watch [reorder-sections? (rd/subscribe [::model/reorder-sections?])]
+         :padding {:horizontal 4}
+         :managed [highlight-title-and-body?
+                   (and (every? :tutorial notes)
+                        (string/blank? (:title note))
+                        (string/blank? (:plaintext note)))
+                   :dispose nil :refresh-on note]
+
+         (m/AnimatedSwitcher
+          .duration (Duration .milliseconds 300)
+          .child
+          (if reorder-sections?
+            (reorder-sections-mode)
+
+            (m/CustomScrollView
+             .controller scroll-controller
+             .slivers
+
+             [(m/SliverToBoxAdapter
+               .child
+               (f/widget
+                :padding {:top 4}
+                (let [section
+                      (m/Card
+                       .elevation 0.0
+                       .child
+                       (f/widget
+                        :padding {:vertical 4}
+                        (m/Column
+                         .children
+                         [(title-widget focus title-tc title-focus highlight-title-and-body?)
+                          (body-widget plaintext-tc focus highlight-title-and-body?)])))]
+
+                  section)))
+
+              (clone-icon tthm note)
+
+              (links tthm)
+              (show-sections (:id note)
+                             false
+                             text-search
+                             sorted-sections
+                             section-list-controller)
+
+              (m/SliverFillRemaining
+               .hasScrollBody false
+               .child
+               (f/widget
+                :padding {:left 0}
+                (m/Column
+                 .mainAxisAlignment m/MainAxisAlignment.end
+                 .children
+                 (concat
+                  (when ai-generating?
+                    [(f/widget
+                      :padding {:top 20}
+                      (m/Container
+                       .width 400
+                       .child  (m/LinearProgressIndicator)))])
+                  [(add-section-button note
+                                       section-menu-globalkey
+                                       section-list-controller
+                                       scroll-controller)
+                   (tags note)
+                   (m/Row
+                    .mainAxisAlignment m/MainAxisAlignment.spaceBetween
+
+                    .children
+                    (concat [(last-updated-widget note)]
+                            (when kIsWeb
+                              [(f/widget
+                                :get {{tthm .-textTheme} m/Theme}
+                                :watch [brightness (rd/subscribe [::model/get-brightness])]
+
+                                (m/Text "Keyboard shortcuts: alt+f1. Press tab if not responding."
+                                        .style (.merge
+                                                (.-bodySmall tthm)
+                                                (theme/faded-text-style brightness))))])))]))))]))))))))))

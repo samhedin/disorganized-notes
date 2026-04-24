@@ -1,0 +1,1272 @@
+(ns disorganized.ui.list
+  (:require
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["dart:convert" :as c]
+   ["package:disorganized_notes/utils.dart" :as dutils]
+   ["dart:io" :refer [Platform]]
+   ["package:home_widget/home_widget.dart" :refer [HomeWidget]]
+   ["package:shared_preferences/shared_preferences.dart" :as sp]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode FlutterError]]
+   ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
+
+   ["package:disorganized_notes/IndentableListItem.dart" :refer [IndentableListItem]]
+   ["package:flutter/services.dart" :as svc]
+   ["package:url_launcher/url_launcher.dart" :as url]
+   [disorganized.ui.theme :as theme]
+   ["package:flutter/widgets.dart" :as f_widgets]
+   [clojure.set :refer [union]]
+   [clojure.string :as string]
+   [disorganized.model :as model]
+   [disorganized.ui.popup :as popup]
+   [hti.re-dash.alpha :as rd]
+   [disorganized.model :as utils]
+   ["package:flutter/material.dart" :as m]
+   ["package:firebase_ai/firebase_ai.dart" :as ai]
+   [cljd.flutter :as f]))
+
+(def schema
+  (let [data (ai/Schema.string
+              .description "The item text")
+        child-schema (ai/Schema.array
+                      .nullable true
+                      .items
+                      (ai/Schema.object
+                       .description "One item, optionally with children"
+                       .properties
+                       (dutils/stringKeys
+                        {"data" data
+                         "children"
+                         (ai/Schema.array
+                          .items (ai/Schema.object
+                                  .description "One item"
+                                  .properties (dutils/stringKeys
+                                               {"data" data}))
+                          .nullable true)})))]
+    (ai/Schema.object
+     .properties
+     (dutils/stringKeys
+      {"items"
+       (ai/Schema.array
+        .items (ai/Schema.object
+                .description "One item, optionally with children"
+                .properties
+                (dutils/stringKeys
+                 {"data" data
+                  "children" child-schema})))}))))
+
+(defn add-ids [item]
+  {"data" (item "data")
+   "children" (mapv #(add-ids %) (item "children"))
+   "id" (str (random-uuid))})
+
+(defn parse-response [response]
+  (mapv add-ids (response "items")))
+
+(defn ai-create [prompt]
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+                                .model model/gemini-model
+                                .generationConfig
+                                (ai/GenerationConfig
+                                 .responseMimeType "application/json"
+                                 .responseSchema schema))
+
+        response (await (.generateContent model [(ai/Content.text prompt)]))
+        response (model/dart->clj-ds (c/jsonDecode (.-text response)))]
+    (parse-response response)))
+
+(defn ai-modify [ctx section]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator m/ScaffoldMessenger]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (m/TextEditingController)]
+    :watch [current-note (rd/subscribe [::model/current-note])]
+    :watch [brightness (rd/subscribe [::model/get-brightness])]
+    :watch [premium? (rd/subscribe [::model/premium?])]
+
+    :watch [prefs (rd/subscribe [::model/prefs])]
+
+    (m/AlertDialog
+     .content
+     (m/Column
+      .mainAxisSize m/MainAxisSize.min
+      .crossAxisAlignment m/CrossAxisAlignment.start
+      .children
+      (concat
+       [(m/Align
+         .alignment m/Alignment.center
+         .child (m/Text "Update list with AI"
+                        .style (.-titleMedium tthm)))]
+
+       [(f/widget
+         :padding {:vertical 12}
+         (m/Text "This will share this note with a third party AI provider.
+Click Cancel if you're not cool with that."
+                 .style (.merge
+                         (.-bodySmall tthm)
+                         (theme/faded-text-style brightness))))
+        (m/TextField
+         .maxLength 300
+         .decoration (m/InputDecoration
+                      .hintText "Write modification"
+                      .hintStyle (.-bodySmall tthm))
+         .controller tc)]))
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Cancel"))
+
+               (m/TextButton
+                .onPressed (fn []
+                             (.pop navigator)
+                             (rd/dispatch [::model/set-key :ai-generating-section true])
+
+                             (let [items (mapv (fn [x]
+                                                 (dissoc x "id"))
+                                               (section "content"))
+
+                                   checked-items (mapv (fn [x]
+                                                         (dissoc x "id"))
+                                                       (section "checked-content"))
+                                   new-list (await (ai-create
+                                                    (str "Modify this list according to instructions"
+                                                         items
+                                                         "\n"
+                                                         checked-items
+                                                         "\n"
+                                                         "Prompt"
+                                                         "\n"
+                                                         (.-text tc))))]
+                               (rd/dispatch
+                                [::model/update-current-note
+                                 (fn [m]
+                                   (assoc-in m [:sections (section "id") "content"] new-list))]))
+                             (rd/dispatch [::model/set-key :ai-generating-section false]))
+
+                .child (m/Text "Modify list"))]))))
+
+(defn set-home-screen-widget [ctx note-id section]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :let [section-id (section "id")]
+    (m/AlertDialog
+     .content
+     (m/Text "Make list into a widget?
+
+- You can only have one widget.
+- On supported launchers the widget will be added.")
+
+     .actions [(m/TextButton
+                .child (m/Text "Cancel")
+                .onPressed (fn []
+                             (.pop navigator)
+                             nil))
+               (m/TextButton
+                .onPressed (fn []
+                             (let [prefs (await (sp/SharedPreferences.getInstance))
+                                   ssection (c/jsonEncode (dutils/recursivelyStringifyKeys section))
+                                   pin-request? (await (HomeWidget.isRequestPinWidgetSupported))]
+                               (await (.setString
+                                       prefs
+                                       "note-id"
+                                       note-id))
+
+                               (await (.setString
+                                       prefs
+                                       "section-id"
+                                       section-id))
+
+                               (await (.setString prefs "todo_list" ssection))
+
+                               (rd/dispatch [::model/load-home-screen-widget-data])
+
+                               (await (HomeWidget.saveWidgetData "todo_list" ssection))
+                               (await (HomeWidget.updateWidget
+                                       .androidName "NoteWidgetReceiver"))
+
+                               (when pin-request?
+                                 (HomeWidget.requestPinWidget
+                                  .androidName "NoteWidgetReceiver")))
+
+                             (.pop navigator)
+                             nil)
+                .child (m/Text "Ok"))]))))
+
+(defn text->list [ctx section-id]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    :managed [tc (m/TextEditingController)]
+    (m/AlertDialog
+     .content
+     (m/SingleChildScrollView
+      .child (m/Column
+              .spacing 10
+              .mainAxisSize m/MainAxisSize.min
+              .children
+              (concat
+               [(m/Text "Import list"
+                        .style (.-titleLarge tthm))
+
+                (m/Text "Enter text you want to make into a list, will be split on newlines. 
+Leading \"-\" will be stripped."
+                        .style (.-bodyLarge tthm))
+                (m/TextField
+                 .decoration (m/InputDecoration
+                              .hintText "Item1\nItem2\nItem3")
+                 .maxLines nil
+                 .minLines 3
+                 .controller tc)])))
+
+     .actions [(m/TextButton
+                .onPressed #(.pop navigator)
+                .child (m/Text "Cancel"))
+               (m/TextButton
+                .onPressed (fn []
+                             (let [lines (filter #(not (string/blank? %))
+                                                 (string/split (.-text tc) #"\n"))]
+                               (rd/dispatch [::model/update-current-note
+                                             (fn [m]
+                                               (update-in m [:sections section-id "content"]
+                                                          #(concat %
+                                                                   (map (fn [l]
+                                                                          {"id" (str (random-uuid))
+                                                                           "children" []
+                                                                           "data" (string/trim
+                                                                                   (if (string/starts-with? l "-")
+                                                                                     (subs l 1)
+                                                                                     l))}) lines))))]))
+                             (.pop navigator))
+                .child (m/Text "Parse!"))]))))
+
+;; (defn properties [note-id section *section-size]
+;;   [(f/widget
+;;     :get {{cs .-colorScheme} m/Theme}
+;;     :let [section-id (section "id")]
+;;     :get [m/ScaffoldMessenger]
+;;     :watch [premium? (rd/subscribe [::model/premium?])]
+
+;;     :context ctx
+;;     :watch [{{:strs [content columns calculations rowcalcs name]} section-id} (rd/subscribe [::model/current-sections])]
+;;     (m/MenuAnchor
+;;      .builder (fn [ctx controller menuChildren]
+;;                 (m/IconButton
+;;                  .onPressed (fn []
+;;                               (if (.-isOpen controller)
+;;                                 (.close controller)
+;;                                 (.open controller)))
+;;                  .icon (m/Icon m/Icons.more_vert
+;;                                .color (.-onSurfaceVariant cs))))
+;;      .menuChildren
+;;      (concat
+;;       [(m/MenuItemButton
+;;         .onPressed (fn []
+;;                      (if premium?
+;;                        (model/unfocus-then-run
+;;                         (rd/dispatch [::model/update-current-note
+;;                                       (fn [m]
+;;                                         (update-in m [:sections section-id "content"]
+;;                                                    (fn [content]
+;;                                                      (sort-by #(% "data") content))))]))
+;;                        (model/paywall scaffold-messenger)))
+;;         .child (m/ListTile
+;;                 .title (m/Text "Alphabetic sort")
+;;                 .trailing (m/Visibility
+;;                            .visible (not premium?)
+;;                            .child
+;;                            (m/Icon m/Icons.star_outline))))
+
+;;        (m/MenuItemButton
+;;         .onPressed (fn []
+;;                      (if premium?
+;;                        (do
+;;                          (.showSnackBar
+;;                           scaffold-messenger
+;;                           (m/SnackBar
+;;                            .content (m/Text "Sorting by similarity.")))
+;;                          (model/unfocus-then-run
+;;                           (rd/dispatch [::model/smart-sort-list section-id])))
+;;                        (do
+;;                          (.showSnackBar scaffold-messenger
+;;                                         (m/SnackBar .content
+;;                                                     (m/Text "Smart sort requires an account with premium access")))
+;;                          (await (utils/paywall scaffold-messenger)))))
+;;         .child (m/ListTile
+;;                 .title (m/Text "Similarity sort")
+;;                 .trailing (m/Visibility
+;;                            .visible (not premium?)
+;;                            .child
+;;                            (m/Icon m/Icons.star_outline))))
+
+;;        (m/MenuItemButton
+;;         .onPressed (fn [] (text->list ctx section-id))
+;;         .child (m/ListTile
+;;                 .title (m/Text "Import list")))]
+
+;;       (when (and (not kIsWeb) Platform.isAndroid)
+;;         [(m/MenuItemButton
+;;           .child (m/ListTile
+;;                   .title (m/Text "Add widget to home screen"))
+;;           .onPressed (fn []
+;;                        (set-home-screen-widget ctx note-id section)))])
+
+;;       [(m/MenuItemButton
+;;         .onPressed (fn []
+;;                      (toggle-checkbox-visibility section-id))
+;;         .child (m/ListTile
+;;                 .title (m/Text "Show/hide checkboxes")))
+
+;;        (m/MenuItemButton
+;;         .onPressed (fn []
+;;                      (popup/delete-section
+;;                       ctx
+;;                       note-id
+;;                       section-id
+;;                       app-localizations
+;;                       section
+;;                       *section-size))
+;;         .child (m/ListTile
+;;                 .title (m/Text "Delete list")))])))])
+
+(defn properties [note-id section *section-size]
+  [(f/widget
+    :get {{cs .-colorScheme} m/Theme}
+    :let [section-id (section "id")]
+    :get [m/ScaffoldMessenger]
+    :watch [premium? (rd/subscribe [::model/premium?])]
+
+    :context ctx
+    :watch [{{:strs [content columns calculations rowcalcs name]} section-id} (rd/subscribe [::model/current-sections])]
+    (m/PopupMenuButton
+     .clipBehavior m/Clip.antiAlias
+     .tooltip "List settings"
+     .onSelected (fn [selected]
+                   (case selected
+                     "import" (text->list ctx section-id)
+                     "homescreen" (if (and (not kIsWeb) Platform.isAndroid)
+                                    (set-home-screen-widget ctx note-id section)
+                                    (model/snackbar scaffold-messenger "Only supported on Android"))
+                     "alphabetize" (if premium?
+                                     (model/unfocus-then-run
+                                      (rd/dispatch [::model/update-current-note
+                                                    (fn [m]
+                                                      (update-in m [:sections section-id "content"]
+                                                                 (fn [content]
+                                                                   (sort-by #(% "data") content))))]))
+
+                                     (model/paywall scaffold-messenger))
+                     "delete" (popup/delete-section
+                               ctx
+                               note-id
+                               section-id
+                               section
+                               *section-size)
+
+                     "ai-modify" (if premium?
+                                   (await (ai-modify ctx section))
+                                   (model/paywall scaffold-messenger))
+
+                     "checkboxes" (toggle-checkbox-visibility section-id)
+                     "similarity" (if premium?
+                                    (do
+                                      (.showSnackBar
+                                       scaffold-messenger
+                                       (m/SnackBar
+                                        .content (m/Text "Sorting by similarity.")))
+                                      (model/unfocus-then-run
+                                       (rd/dispatch [::model/smart-sort-list section-id])))
+                                    (do
+                                      (.showSnackBar scaffold-messenger
+                                                     (m/SnackBar .content
+                                                                 (m/Text "Smart sort requires an account with premium access")))
+                                      (await (utils/paywall scaffold-messenger))))))
+     .itemBuilder (fn [_]
+                    (let [^#/(List m/PopupMenuItem) v
+                          (concat
+                           [(m/PopupMenuItem
+                             .value "alphabetize"
+                             .child (m/ListTile
+                                     .title (m/Text "Alphabetic sort")
+                                     .trailing (m/Visibility
+                                                .visible (not premium?)
+                                                .child
+                                                (m/Icon m/Icons.star_outline))))
+
+                            (m/PopupMenuItem
+                             .value "similarity"
+                             .child (m/ListTile
+                                     .title (m/Text "Similarity sort")
+                                     .trailing (m/Visibility
+                                                .visible (not premium?)
+                                                .child
+                                                (m/Icon m/Icons.star_outline))))
+
+                            (m/PopupMenuItem
+                             .value "ai-modify"
+                             .child (m/ListTile
+                                     .title (m/Text "Modify with AI")
+                                     .trailing (m/Visibility
+                                                .visible (not premium?)
+                                                .child
+                                                (m/Icon m/Icons.star_outline))))
+
+                            (m/PopupMenuItem
+                             .value "import"
+                             .child (m/ListTile
+                                     .title (m/Text "Import list")))
+                            (m/PopupMenuItem
+                             .value "checkboxes"
+                             .child (m/ListTile
+                                     .title (m/Text "Show/hide checkboxes")))
+                            (m/PopupMenuItem
+                             .value "delete"
+                             .child (m/ListTile
+                                     .title (m/Text "Delete list")))]
+
+                           (when (and (not kIsWeb) Platform.isAndroid)
+                             [(m/PopupMenuItem
+                               .child (m/ListTile
+                                       .title (m/Text "Add widget to home screen"))
+                               .value "homescreen")]))]
+                      v))))])
+
+(def animate-item-delay (Duration .milliseconds 0))
+(def animate-item-duration (Duration .milliseconds 250))
+
+(defn location->position [section-id location & [checked-content?]]
+  (into []
+        (concat
+         [:sections section-id (if checked-content? "checked-content" "content")]
+         (butlast (flatten (map vector location (repeat "children")))))))
+
+(defn toggle-checkbox-visibility [section-id]
+  (rd/dispatch [::model/update-current-note
+                (fn [m]
+                  (update-in m
+                             [:sections section-id "checkboxes-visible"]
+                             not))]))
+
+(defn update-item-text [section-id id text location]
+  (rd/dispatch
+   [::model/update-current-note
+    (fn [note]
+      (let [text (if (= \u200b (first text))
+                   (subs text 1)
+                   text)
+            location (confirm-location note location id section-id)]
+        (update-in note
+                   (location->position section-id location)
+                   (fn [m]
+                     (assoc m "data" text)))))])
+
+  nil)
+
+(defn style [checkbox]
+  (m/TextStyle
+   .decoration (if  checkbox
+                 (m/TextDecoration.lineThrough)
+                 (m/TextDecoration.none))))
+
+(defn set-checkbox-recursively [content newval]
+  (let [c' (assoc content "checkbox" newval)]
+    (update c' "children"
+            (fn [c]
+              (mapv #(set-checkbox-recursively % newval) c)))))
+
+(defn new-list-item []
+  {"data" ""
+   "id" (str (random-uuid))
+   "checkbox" false})
+
+(defn find-location
+  "If there is a chance that the location view is out of sync with the data, then use this to get the correct location"
+  [item-id tree]
+  (some (fn [[idx node]]
+          (let [path [idx]]
+            (cond
+              ;; found the item here
+              (= (node "id") item-id) path
+
+              ;; search children recursively
+              (seq (node "children"))
+              (when-let [subpath (find-location item-id (node "children"))]
+                (into path subpath))
+
+              :else nil)))
+        (map-indexed vector tree)))
+
+(defn confirm-location
+  "In some cases the location is out of sync with the data. For example, this happens if the user has used the note search feature to filter the list. Since this is a operation in the view, the indices in the data model are unchanged and therefore the location is incorrect."
+  [m location id section-id & [checked?]]
+  (let [position (location->position section-id location checked?)]
+    (if (= id (get-in m (conj position "id")))
+      ;;Location is correct, nothing to do
+      location
+
+      ;;Location out of sync with data model. Have to find the correct location.
+      (find-location
+       id
+       (get-in m [:sections
+                  section-id
+                  (if checked?
+                    "checked-content"
+                    "content")])))))
+
+(defn move-from-checked-content
+  [section-id id location]
+  (rd/dispatch
+   [::model/update-current-note
+    (fn [m]
+      (let [location (confirm-location
+                      m
+                      location
+                      id
+                      section-id
+                      true)
+            position (location->position section-id location true)
+
+            path [:sections section-id "checked-content" (first location)]
+
+              ;;Uncheck the node that was clicked
+            m-unchecked (update-in m position #(assoc % "checkbox" false))
+
+              ;;The item that was clicked
+            item (get-in m-unchecked path)
+
+              ;;Remove from checked-content
+            m' (update-in m-unchecked (butlast path)
+                          #(model/vec-remove % (first location)))]
+
+        (update-in  m' ;;Uncheck the root node and add to content
+                    [:sections section-id "content"]
+                    #(conj % (-> item
+                                 (assoc "checkbox" false))))))]))
+
+(defn all-children-checked?
+  "Returns true if all descendants (children, grandchildren, etc.) have checkbox = true"
+  [node]
+  (let [children (get node "children" [])]
+    (if (empty? children)
+      true  ; Base case: no children means all children are checked
+      (and
+        ;; All immediate children must be checked
+       (every? #(get % "checkbox" false) children)
+        ;; AND recursively check all descendants of each child
+       (every? all-children-checked? children)))))
+
+(defn set-checkboxes [section-id id newval location checked-content?]
+  (when newval
+    (rd/dispatch [::model/unset-list-focus? id]))
+
+  (if checked-content?
+    (move-from-checked-content section-id id location)
+
+    (rd/dispatch [::model/update-current-note
+                  (fn [note]
+                    (let [location (confirm-location
+                                    note
+                                    location
+                                    id
+                                    section-id)
+
+                          position (location->position section-id location)
+                          note' (update-in note
+                                           position
+                                           (fn [content]
+                                             (set-checkbox-recursively content newval)))
+
+                          root-note (location->position
+                                     section-id
+                                     [(first location)])
+
+                          node-checked? (all-children-checked?
+                                         (get-in note' root-note))
+
+                          note' (if node-checked?
+                                  (update-in note' root-note #(assoc % "checkbox" true))
+                                  note')]
+
+                      ;;then, if the topmost item is checked we'll send it to checked-content
+                      (if (and newval (or (= 1 (count location))
+                                          node-checked?))
+
+                        (let [node (get-in note' [:sections section-id "content"
+                                                  (first location)])]
+                          (-> note'
+                              (update-in [:sections section-id "checked-content"]
+                                         #(conj % node))
+                              (update-in
+                               [:sections section-id "content"]
+                               #(model/vec-remove % (first location)))))
+                        note')))]))
+
+  (rd/dispatch [::model/save-list-widget?
+                {:section-id section-id}]))
+
+(defn- add-nested-item-focused
+  "This is called when an item is focused and +child is pressed"
+  [section-id {:keys [location]}]
+
+  (let [parent-position (location->position
+                         section-id
+                         location)
+        new-item (new-list-item)]
+
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (update-in m
+                               parent-position
+                               (fn [list-or-parent]
+
+                                 (update list-or-parent
+                                         "children" #(conj (or % []) new-item)))))])
+
+    (rd/dispatch [::model/set-recently-added-item (new-item "id")])))
+
+(defn- add-nested-item-unfocused
+  "This is called when a user clicks +child item without having anything focused. 
+  In this situation we'll add a child to the node at the last item of the list at the top."
+  [section-id]
+  (let [new-item (new-list-item)]
+
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+        (update-in
+         m
+         [:sections section-id "content"]
+         (fn [content]
+           (let [parent (last content)]
+             (assoc content
+                    (dec (count content))
+                    (update parent "children" #(conj % new-item)))))))])
+    (rd/dispatch [::model/set-recently-added-item (new-item "id")])))
+
+(defn- add-item-focused [section-id {:keys [location]}]
+  (let [new-item (new-list-item)
+        position (location->position section-id (butlast location))]
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+        (update-in m position
+                   (fn [content]
+                     (if (contains? content "children")
+                       (update content "children"
+                               #(model/vec-add %
+                                               (min (count %)
+                                                    (inc (last location)))
+                                               new-item))
+                       (model/vec-add content
+                                      (min (count content) (inc (last location)))
+                                      new-item)))))])
+
+    (rd/dispatch [::model/set-recently-added-item (new-item "id")])))
+
+(defn- add-item-unfocused [section-id]
+  (let [new-item {"data" ""
+                  "id" (str (random-uuid))
+                  "checkbox" false}]
+    (rd/dispatch [::model/update-current-note
+                  (fn [m]
+                    (update-in m
+                               [:sections section-id "content"]
+                               (fn [list]
+                                 (conj list new-item))))])
+
+    (rd/dispatch [::model/set-recently-added-item (new-item "id")])))
+
+(defn add-item
+  "Adds item below the currently focused list item. "
+  [section-id currently-focused-node?  ^m/ScaffoldMessengerState scaffold-messenger & [nest?]]
+  (cond
+    (and nest? (< 3 (count (:location currently-focused-node?))))
+    (.showSnackBar
+     scaffold-messenger
+     (m/SnackBar .content (m/Text
+                           "Max level of nesting reached")))
+
+    (and nest? currently-focused-node?)
+    (add-nested-item-focused section-id currently-focused-node?)
+
+    nest? (add-nested-item-unfocused section-id)
+
+    currently-focused-node? (add-item-focused section-id currently-focused-node?)
+
+    :else (add-item-unfocused section-id)))
+
+(defn checkbox-widget [item section-id id recently-added-id location checked-content?]
+  (let [c-val (if (nil? (item "checkbox"))
+                false
+                (item "checkbox"))]
+
+    [(f/widget
+      :get {{cs .-colorScheme} m/Theme}
+
+      (m/Checkbox
+       .value c-val
+       .onChanged
+       (fn [c]
+         (model/unfocus-then-run
+          (set-checkboxes section-id id c location checked-content?)))))]))
+
+(defn delete-item [section-id location id & [checked?]]
+
+  (rd/dispatch [::model/unset-list-focus? id])
+  (let [position (location->position section-id (butlast location) checked?)]
+    (rd/dispatch [::model/update-current-note
+                  (fn [note]
+                    (update-in note
+                               position
+                               (fn [content]
+                                 (if (= 1 (count location))
+                                   (model/vec-remove content (last location))
+                                   (update content "children"
+                                           #(model/vec-remove % (last location)))))))])))
+
+(defn max-depth [item]
+  (if-let [children (seq (item "children"))]
+    (inc (apply max (map max-depth children)))
+    1))
+
+(defn- indent-item [section-id location]
+  (when (> 3 (count location))
+    (let [top? (or (and (= 0 (first location))
+                        (= 1 (count location)))
+                   (= 0 (last location)))
+          old-sublist (location->position section-id (butlast location) false)
+          new-parent-position (location->position section-id
+                                                  (update location
+                                                          (dec (count location))
+                                                          dec))]
+      (when (not top?)
+        (rd/dispatch
+         [::model/update-current-note
+          (fn [m]
+            (let [item (get-in m (location->position section-id location))
+                  max-item-depth (max-depth item)]
+              (if (or top? (<= 3 max-item-depth))
+                m
+                (-> m
+                    (update-in (conj new-parent-position "children")
+                               #(conj % item))
+                    (update-in old-sublist
+                               (fn [content]
+                                 (if (contains? content "children")
+                                   (update content "children"
+                                           #(model/vec-remove % (last location)))
+                                   (model/vec-remove content (last location)))))))))])))))
+
+(defn- de-indent-item
+  [section-id location]
+    ;;To de-indent an item, first find its parent
+  (let [parent (into [] (butlast location))
+        new-index (-> parent last inc)
+        parent-position (location->position section-id (butlast location) false)]
+
+    (rd/dispatch
+     [::model/update-current-note
+      (fn [m]
+        (let [item (get-in m (location->position section-id location))]
+          (-> m
+              (update-in
+               parent-position
+               (fn [parent]
+                 (->
+                  parent (update "children"
+                                 #(model/vec-remove % (last location))))))
+              (update-in
+               (location->position section-id (butlast parent) false)
+               (fn [content]
+                 (if (contains? content "children")
+                   (update content "children"
+                           #(model/vec-add % new-index item))
+                   (model/vec-add content new-index item)))))))])));;todo
+
+(def indent-item-duration (Duration .milliseconds 100))
+
+(defn- autocomplete-options-view [section-id id location]
+  (fn [ctx on-selected options]
+    (when (not kIsWeb)
+      (FirebaseCrashlytics.instance.setCustomKey
+       "function"  "autocomplete-options-view"))
+    (f/widget
+     :watch [height-factor (atom 0.0) :as *height-factor
+             visible? (atom true) :as *visible?]
+     :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                  (fn [_]
+                    (reset! *height-factor 1.0))) :dispose nil]
+
+     :animate [height-factor height-factor
+               :duration (Duration .milliseconds 150)
+               :curve m/Curves.ease]
+     (m/ConstrainedBox
+      .constraints (m/BoxConstraints .maxWidth 300
+                                     .maxHeight 300))
+     (m/TapRegion
+      .onTapOutside (fn [_]
+                      (reset! *visible? false)))
+     (m/Visibility
+      .visible visible?)
+     m/Card
+     (m/ListView.builder
+      .shrinkWrap true
+      .itemCount (count options)
+      .itemBuilder (fn [_ i]
+                     (m/TextButton
+                      .child
+                      (m/Align
+                       .alignment m/Alignment.centerLeft
+                       .heightFactor height-factor
+                       .child
+                       (m/Text (nth options i)
+                               .maxLines 1
+                               .overflow m/TextOverflow.ellipsis))
+
+                      .onPressed (fn []
+                                   ;;This inserts into the textbox
+                                   (on-selected (nth options i))
+                                   (update-item-text section-id id (nth options i) location))))))))
+
+(defn- autocomplete-options [all-items content]
+  (fn [^m/TextEditingValue {:flds [text]}]
+    (let [ltt (string/lower-case (str text))
+          ltext (if (= \u200b (first ltt))
+                  (subs ltt 1)
+                  ltt)
+          tcount (count text)
+          ^#/(Iterable String) result
+          (when  (> (count text) 3)
+            (let [hits
+                  (keep
+                   #(let [ltt (string/lower-case (:data %))]
+                      (when
+                       (and
+                        (string/includes?
+                         ltt
+                         ltext)
+                        (not= ltt ltext))
+                        (:data %)))
+                   all-items)]
+
+              hits))]
+      result)))
+
+(defn reorderable-list [items section-id item-is-checked? parent-location text-search]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   :watch [{{:strs [checkboxes-visible]} section-id}
+           (rd/subscribe [::model/current-sections])]
+   :watch [filtered-items (atom (if (string/blank? text-search)
+                                  items
+                                  (filter
+                                   (fn [item]
+                                     (string/includes?
+                                      (string/lower-case (item "data"))
+                                      text-search)) items))) :as *filtered-items
+           :refresh-on items]
+   (m/ReorderableListView.builder
+    .onReorderStart (fn [_]
+                      (.unfocus (.-primaryFocus (.instance m/FocusManager))))
+    .buildDefaultDragHandles false
+    .physics (m/NeverScrollableScrollPhysics)
+    .shrinkWrap true
+    .itemCount (count filtered-items)
+    .itemBuilder
+    (fn [_ index]
+      (f/widget
+       :let [location (conj (into [] parent-location) index)]
+
+       :key (str ((nth filtered-items index) "id") "top-level")
+       :watch [rearrange? (rd/subscribe [::model/get-restructure-mode section-id])
+               brightness (rd/subscribe [::model/get-brightness])]
+       :get {{tthm .-textTheme} m/Theme}
+       :let [item (nth filtered-items index)]
+
+       (autocomplete-list-item item
+                               checkboxes-visible
+                               section-id
+                               location
+                               items
+                               brightness
+                               item-is-checked?)))
+
+    .onReorder  (fn [oldIndex newIndex]
+                  ;;Remember: The location variable
+                  ;;in this callback is the location of the parent.
+                  ;;if it's a top level item then location is empty.
+                  ;;The actual location is added inside the itembuilder above
+                  ;;but not visible here clearly
+                  (if (not (string/blank? text-search))
+                    (model/snackbar scaffold-messenger "Reordering is disabled while searching")
+                    (let [local-pos  (flatten (map vector parent-location (repeat "children")))]
+
+                      ;;We perform an immediate local item swap, because redash does its updating async
+                      ;;which leads to animation jank. See more info here:
+                      ;; https://stackoverflow.com/questions/77473688/flutter-reorderablelistview-flashes-when-reorder-firebase-documents
+                      ;; https://github.com/felangel/bloc/issues/4013#issuecomment-1891021792.
+                      (swap! *filtered-items
+                             (fn [items]
+                               (if (empty? parent-location)
+                                 (utils/vec-move items
+                                                 oldIndex
+                                                 (if (< oldIndex newIndex)
+                                                   (dec newIndex)
+                                                   newIndex))
+                                 (update-in items local-pos
+                                            (fn [children]
+                                              (utils/vec-move children
+                                                              oldIndex
+                                                              (if (< oldIndex newIndex)
+                                                                (dec newIndex)
+                                                                newIndex)))))))
+
+                      (rd/dispatch
+                       [::model/update-current-note
+                        (fn [m]
+
+                          (let [pos (location->position section-id parent-location)
+                                m' (update-in m (if (empty? parent-location)
+                                                  pos
+                                                  (conj pos "children"))
+                                              (fn [x]
+                                                (utils/vec-move x oldIndex (if (< oldIndex newIndex)
+                                                                             (dec newIndex)
+                                                                             newIndex))))]
+
+                            m'))])))))))
+
+(defn list-item [{:strs [data id checkbox] :as item} checkboxes-visible section-id location item-is-checked? ^m/TextEditingController tc ^m/FocusNode focus-node]
+  (f/widget
+   :get [m/ScaffoldMessenger]
+   :get {{tthm .-textTheme} m/Theme}
+   :watch [recently-added-id (rd/subscribe [::model/get-recently-added-item])
+           focused? focus-node :> .-hasFocus]
+
+   :watch [h (atom (if (= id recently-added-id) 0 100)) :as *h]
+   :watch [dragging (atom 0) :as *dragging]
+   :padding {:left (max 0 (+ (* (dec (count location)) 20)
+                             dragging))}
+   :key (str "list-item " id location)
+   :managed [_ (do
+                 (m/WidgetsBinding.instance.addPostFrameCallback
+                  (fn [_]
+                    (reset! *h 100)
+                    nil))
+                 nil) :dispose nil]
+
+   :animate [h h
+             :duration animate-item-duration
+             :curve m/Curves.ease]
+
+   m/ClipRect
+   (m/Align
+    .alignment m/Alignment.centerLeft
+    .heightFactor (/ h 100))
+   (m/Row
+    .mainAxisSize m/MainAxisSize.min
+    .children
+    (concat
+     (when (not item-is-checked?)
+       [(m/ReorderableDragStartListener
+         .index (last location)
+         .key (m/ValueKey (str id "dragstartlistener2"))
+         .child
+         (m/GestureDetector
+          .onHorizontalDragEnd
+          (fn [_]
+            (let [d @*dragging]
+              (model/unfocus-then-run
+               (when (>= (abs d) 10)
+                 (if (pos? d)
+                   (indent-item section-id location)
+                   (de-indent-item section-id location)))
+
+               (reset! *dragging 0))))
+
+          .onHorizontalDragUpdate
+          (fn [details]
+            (let [dx (.-dx (.-delta details))]
+              (swap! *dragging #(min 20 (+ % dx)))))
+
+          .child (m/Icon m/Icons.drag_indicator))
+
+         ;; (IndentableListItem
+         ;;  .child (m/Opacity
+         ;;          .opacity 0.75
+         ;;          .child )
+         ;;  .maxItemDepth (max-depth item)
+         ;;  .location location
+         ;;  .onSwipe (fn [direction]
+         ;;             (rd/dispatch [::model/set-list-focus nil])
+         ;;             (model/unfocus-then-run
+         ;;              (if (= direction "left")
+         ;;                (de-indent-item section-id location)
+         ;;                (indent-item section-id location))))
+         ;;  .scaffoldMessenger scaffold-messenger
+         ;;  .maxLevels (- 3 (count location)))
+         )])
+
+     (when checkboxes-visible
+       (checkbox-widget item section-id id recently-added-id location item-is-checked?))
+
+     [(if item-is-checked?
+        (m/Expanded
+         .child (m/ListTile
+                 .title (m/Text (str data)
+                                .style (m/TextStyle .decoration (m/TextDecoration.lineThrough)))
+                 .trailing (m/IconButton
+                            .icon (m/Opacity
+                                   .opacity 0.75
+                                   .child (m/Icon m/Icons.clear))
+                            .onPressed
+                            (fn []
+                              (delete-item section-id location id true)
+
+                              nil))))
+        (f/widget
+               ;;This key is needed so that the :bg-watcher below gets the proper location.
+         ;;MAYBE THIS ISN'T NEEDED ANYMORE
+         ;;And update-item-text has a fallback mechanism if the location is out of date.
+         :key (str "->" id)
+         :bg-watcher
+         ([focused? focus-node :> .-hasFocus]
+          (if focused?
+            (rd/dispatch [::model/set-list-focus {:location location
+                                                  :id id}])
+            (do
+              (update-item-text section-id id (.-text tc) location)
+              (rd/dispatch [::model/unset-list-focus? id])
+              (rd/dispatch [::model/save-list-widget?
+                            {:section-id section-id}]))))
+
+         :managed [_ (m/WidgetsBinding.instance.endOfFrame.then
+                      (fn [_]
+
+                              ;;Why \u200b? It's a zero-width space character to detect if the user erased all content. See  README for explanationn
+                        (let [t (.-text tc)]
+                          (when
+                           (string/blank? t)
+                            (if (= (first t) \u200b)
+                              (.-text! tc data)
+                              (.-text! tc (str \u200b data)))))
+
+                        (when (and (or (string/blank? data)
+                                       (= (str \u200b) data))
+                                   (not checkbox)
+                                   (= recently-added-id id))
+                          (.requestFocus focus-node)
+                          (rd/dispatch [::model/set-recently-added-item nil])))) :dispose nil]
+
+         :get [m/ScaffoldMessenger]
+
+         m/Expanded
+         (m/TextField
+          .onSubmitted (fn [text]
+                         (add-item  section-id
+                                    {:id id
+                                     :location location}
+                                    scaffold-messenger))
+
+                ;;This prevents the keyboard from hiding when pressing enter
+          .onEditingComplete (fn [])
+          .textCapitalization m/TextCapitalization.sentences
+          .decoration (cond
+                        checkboxes-visible (m/InputDecoration .border (m/InputBorder.none))
+                        :else (m/InputDecoration .border (m/UnderlineInputBorder)))
+          .focusNode focus-node
+
+          ;; .onTapOutside (fn [_]
+          ;;                 (.unfocus (.-primaryFocus (.instance m/FocusManager))))
+
+          .maxLines nil
+          .autocorrect true
+          .enableSuggestions true
+          .textInputAction m/TextInputAction.next
+          .controller tc
+          .onChanged (fn [text]
+                       (when (= "" text)
+                         (reset! *h 0)
+                         (Future/delayed
+                          animate-item-duration
+                          (fn []
+                            (delete-item section-id location id)))
+                         nil))
+
+                ;; .onTapOutside
+                ;; (fn [event]
+                ;;   (update-item-text section-id id (.-text tc) location))
+
+          .style (style (item "checkbox")))))]
+
+     (when (and (not item-is-checked?) focused?)
+       [(m/Opacity
+         .opacity 0.5
+         .child (m/IconButton
+                 .icon (m/Icon m/Icons.clear)
+                 .onPressed
+                 (fn []
+                   (reset! *h 0)
+                   (Future/delayed
+                    animate-item-duration
+                    (fn []
+                      (delete-item section-id location id)))
+                   nil)))])))))
+
+(defn autocomplete-list-item [{:strs [data id] :as item} checkboxes-visible section-id location content brightness item-is-checked?]
+  ;;Location is a list of indices which locate the node.
+  ;;The first location is the top level, then locate by the child key.
+  (f/widget
+   :get [:*text-search  :text-search]
+
+   :key (str id "top")
+   :watch [urls (utils/find-urls data)]
+
+   (m/Column
+    .mainAxisSize m/MainAxisSize.min
+    .children
+    (concat
+     [(f/widget
+       :padding {:horizontal (if checkboxes-visible 0 8)}
+       ;;all-items is actually "all-items" that are saved to firebase.
+       :watch [all-items (rd/subscribe [::model/list-completion])]
+       (m/RawAutocomplete
+        .optionsViewOpenDirection m/OptionsViewOpenDirection.up
+        .optionsBuilder (autocomplete-options all-items content)
+        .optionsViewBuilder (autocomplete-options-view section-id id location)
+
+        .fieldViewBuilder
+        (fn [ctx ^m/TextEditingController tc ^m/FocusNode focus-node on-submit]
+          (list-item item checkboxes-visible section-id location item-is-checked? tc focus-node))))]
+
+     ;;These are the buttons that appear below the textfield if you have urls
+     (when (seq urls)
+       [(m/Align
+         .alignment m/Alignment.bottomLeft
+         .child (f/widget
+                 :let [^m/TextStyle faded (theme/faded-text-style brightness)]
+                 :get {{tthm .-textTheme} m/Theme}
+
+                 (m/Wrap
+                  .children (map model/url-button urls))))])
+
+     [(reorderable-list (item "children") section-id item-is-checked? location text-search)]))))
+
+(defn top-level-reorderable-list [item-is-checked? section-id text-search]
+  (f/widget
+   :watch [{{:strs [content checkboxes-visible checked-content]} section-id}
+           (rd/subscribe [::model/current-sections])]
+   :let [content (if item-is-checked? checked-content content)]
+   (reorderable-list content section-id item-is-checked? [] text-search)))
+
+(defn showlist
+  [section-id text-search]
+  (f/widget
+   :key (str section-id "-list")
+   :context ctx
+   :watch [restructure-mode? (rd/subscribe [::model/get-restructure-mode section-id])]
+   :get {{tthm .-textTheme} m/Theme}
+
+   (m/Column
+    .crossAxisAlignment m/CrossAxisAlignment.stretch
+    .mainAxisSize m/MainAxisSize.min
+    .children
+    [(top-level-reorderable-list false section-id text-search)
+     (m/SizedBox .height 5)
+     (f/widget
+      (m/Visibility
+       .visible (not restructure-mode?))
+      (m/Tooltip
+       .message "Add item to list"
+       .child
+       (f/widget
+        :watch [current-focused-node (rd/subscribe [::model/get-list-focus])]
+        :get {{tthm .-textTheme} m/Theme}
+        :get [m/ScaffoldMessenger]
+
+        (m/OutlinedButton.icon
+         .onPressed (fn []
+                      (model/unfocus-then-run
+                       (add-item section-id current-focused-node scaffold-messenger))
+                      nil)
+         .icon (m/Icon m/Icons.add)
+         .label (m/Text "Item"
+                        .style (.-bodySmall tthm))))))
+
+     (if restructure-mode?
+       (m/Column
+        .crossAxisAlignment m/CrossAxisAlignment.start
+        .children
+        (concat
+         [(m/SizedBox .height 10)
+
+          (m/SizedBox .height 20)
+          (m/Text "Instructions"
+                  .style (.-titleLarge tthm))
+
+          (m/SizedBox .height 10)
+          (m/Row
+           .children
+           [(m/Icon m/Icons.drag_handle)
+            (m/SizedBox .width 5)
+            (m/Text "Reorder up/down or left/right")])
+
+          (m/SizedBox .height 5)
+          (m/Row
+           .children
+           [(m/Icon m/Icons.clear)
+            (m/SizedBox .width 5)
+            (m/Text "Delete. Backspace when empty also deletes.")])]
+
+         (when (and (not kIsWeb) Platform.isAndroid)
+           [(m/Row
+             .children
+             [(m/Icon m/Icons.widgets)
+              (m/SizedBox .width 5)
+              (m/Text "Android: Add widget to your home screen")])])))
+
+       (f/widget
+        :get {{tthm .-textTheme} m/Theme}
+
+        :watch [{:strs [checked-lists-start-expanded]}
+                (rd/subscribe [::model/get-user-options])
+                {{:strs [checked-content]} section-id}
+                (rd/subscribe [::model/current-sections])]
+
+        :managed [expansion-controller (m/ExpansibleController)]
+
+        :get [:*text-search]
+        :bg-watcher ([text-search *text-search]
+                     (cond
+                       (not (string/blank? text-search)) (.expand expansion-controller)
+                       (and
+                        (some? checked-lists-start-expanded)
+                        checked-lists-start-expanded) (.expand expansion-controller)
+                       :else (.collapse expansion-controller)))
+        m/Column
+        .children
+        (concat
+         [(m/SizedBox .height 10)]
+         (when (seq checked-content)
+           [(m/ExpansionTile
+             .controller expansion-controller
+             .title (m/Text (str (count checked-content)
+                                 " checked items")
+                            .style (.-titleMedium tthm))
+             .initiallyExpanded
+             ;;pure beauty
+             (if (> (count checked-content) 20)
+               false ;;to save on rendering.
+               (if (nil? checked-lists-start-expanded)
+                 (if (> (count checked-content) 5)
+                   false
+                   true)
+                 (boolean checked-lists-start-expanded)))
+             .children [(top-level-reorderable-list true section-id text-search)])]))))])))

@@ -1,0 +1,57 @@
+(ns disorganized.ui.misc
+  (:require  ["package:flutter/material.dart" :as m]
+             [cljd.flutter :as f]
+             [disorganized.ui.tutorial :as tutorial]
+             ["package:go_router/go_router.dart" :as go_router]))
+
+
+
+(def ^m/Widget manual
+  (f/build
+   [^go_router/GoRouterState router-state]
+   :get {{tthm .-textTheme} m/Theme}
+   (m/Scaffold
+    .appBar (m/AppBar))
+   .body
+   (f/widget
+    m/SafeArea
+    :padding {:horizontal 8
+              :vertical 8}
+    m/ListView
+    .children
+    (concat
+     (tutorial/zen-of-disorganized tthm)
+     
+     [(m/SizedBox .height 24)
+      (m/Text "Wiki" .style (.-displaySmall tthm))
+      (m/SizedBox .height 24)
+      (m/Text "What are sections?" .style (.-titleLarge tthm))
+      (m/Text "Tables, lists, reminders, timers, text, etc. You name it! You can find all of them at the bottom of the note editing screen.
+
+Advanced options are available if you click the settings icon at the top-right of the section.")
+      (m/SizedBox .height 20)
+      
+      (m/Text "What is cloning?" .style (.-titleLarge tthm))
+      (m/Text "Many notes share commonalities. For example, recipes often include a table of ingredients. 
+Instead of re-creating the table of ingredients every time you write a recipe, cloning copies it over to a new note.
+
+Cloning is only a starting point. After cloning you can edit, add, or remove sections as needed.")
+      (m/SizedBox .height 20)
+      (m/Text "Keyboard shortcuts"
+              .style (.-titleLarge tthm))
+      (m/Text "On the edit note page, press alt+f1 to open the keyboard shortcut legend.")
+
+      (m/SizedBox .height 20)
+      (m/Text "Search" .style (.-titleLarge tthm))
+      
+      (m/Text "The search field on the read page searches for all text content in all notes. This includes table content, list items, reminder descriptions, and section headers!")
+      
+      (m/SizedBox .height 20)
+      
+      (m/Text "How do I reorganize sections?" .style (.-titleLarge tthm))
+      (m/SizedBox .height 10)
+      (m/Text "Open the settings for a section (to the right of its header) and click the reorder icon. This will open a reorder menu.")]))))
+
+
+
+

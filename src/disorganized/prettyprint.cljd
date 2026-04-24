@@ -1,0 +1,232 @@
+(ns disorganized.prettyprint
+  (:require
+   ["package:firebase_remote_config/firebase_remote_config.dart" :as frc]
+   [disorganized.ui.voice :as voice]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference DownloadTask]]
+   
+   ["package:flutter_timezone/flutter_timezone.dart" :refer [FlutterTimezone]]
+   ["package:disorganized_notes/timezone_initializer.dart" :as tz]
+   ["package:firebase_core/firebase_core.dart" :as firebase]
+   ["dart:io" :refer [File Directory]]
+   ["package:path_provider/path_provider.dart" :refer [getApplicationDocumentsDirectory]]
+   ["package:disorganized_notes/firebase_options.dart" :as options]
+   ["package:flutter/foundation.dart" :refer [kIsWeb]]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage Reference DownloadTask]]
+   ["package:purchases_flutter/purchases_flutter.dart" :as rc]
+   ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
+   ["package:flutter/material.dart" :as m]
+   ["dart:io" :refer [Platform]]
+   ["dart:convert" :as c]
+   [clojure.string :as string]
+   ["package:intl/intl.dart" :as intl]
+   [disorganized.ui.theme :as theme]
+   ["package:firebase_analytics/firebase_analytics.dart" :as fa]
+   ["package:disorganized_notes/DateFormatter.dart" :as df]
+   [clojure.walk :as w]
+   [hti.re-dash.alpha :as rd]
+   ["package:intl/intl.dart" :refer [NumberFormat]]
+   [disorganized.model :as model]
+   [cljd.flutter :as f]))
+
+(defn reminder [section]
+  (let [d (str (.toLocal (.toDate (get-in section ["content" "datetime"]))))
+        desc (get-in section ["content" "description"])]
+    (if desc
+      (str d ": " desc)
+      d)))
+
+(defn csv-escape [s]
+  (if (or (string/includes? s ",")
+          (string/includes? s "\"")
+          (string/includes? s "\n"))
+    (str "\"" (string/replace s "\"" "\"\"") "\"")
+    s))
+
+(defn list-item [item depth]
+  (let [prefix (string/join (repeat depth "    "))
+        data (item "data")
+        children (item "children")]
+    (str prefix "- " data
+         (when (seq children)
+           (str "\n" (string/join "\n"
+                                  (map #(list-item % (inc depth))
+                                       children)))))))
+
+(defn list [section]
+  (string/join "\n"
+               (map #(list-item % 0)
+                    (section "content"))))
+
+(defn table-csv [table-section]
+  (let [columns (get table-section "columns")
+        content (get table-section "content")]
+    (str (string/join ", " (map csv-escape columns))
+         "\n"
+         (string/join "\n"
+                      (for [row content]
+                        (string/join ", "
+                                     (for [col columns]
+                                       (csv-escape (get-in row ["data" col])))))))))
+
+(defn table2-csv [table-section]
+  (let [columns (get table-section "columns")
+        content (get table-section "content")]
+    (str (string/join ", " (map csv-escape columns))
+         "\n"
+         (string/join "\n"
+                      (for [row content]
+                        (string/join ", "
+                                     (for [col columns]
+                                       (csv-escape (get-in row ["data" col])))))))))
+
+(defn table-md [table-section]
+  (let [columns (get table-section "columns")
+        content (get table-section "content")
+        header (str "| " (string/join " | " columns) " |")
+        separator (str "| " (string/join " | " (repeat (count columns) "---")) " |")
+        rows (for [row content]
+               (str "| " (string/join " | "
+                                      (for [col columns]
+                                        (get-in row ["data" col] ""))) " |"))]
+    (string/join "\n" (concat [header separator] rows))))
+
+(defn table2-md [table-section]
+
+  (let [columns              (get table-section "columns")
+        rowcalcs             (get table-section "rowcalcs")
+        content              (get table-section "content")
+        column-calculations  (table-section "calculations")
+        rowcalc-cols?        (model/add-rowcalcs-to-columns? columns rowcalcs)
+        header               (str "| " (string/join " | " (concat (map #(% "name") columns)
+                                                                  rowcalc-cols?)) " |")
+        separator            (str "| " (string/join " | " (repeat (count (concat columns rowcalc-cols?)) "---")) " |")
+        calc-values          (model/table2-calculate-rows rowcalcs columns content)
+        column-totals        (model/table2-calculate-columns column-calculations columns content)
+        rows                 (map (fn [row calc-row]
+                                    (str "| "
+                                         (string/join " | "
+                                                      (concat
+                                                       (for [col columns]
+                                                         (get-in row ["data" (col "cid")] ""))
+                                                       calc-row))
+                                         " |"))
+                                  content
+                                  calc-values)
+        totals-row           (str "| " (string/join " | "
+                                                    (concat column-totals
+                                                            (repeat (count rowcalc-cols?) ""))) " |")]
+    (string/join "\n" (concat [header separator] rows [totals-row]))))
+
+
+(defn media [section]
+  ;;TODO ADD CAPTIONS TO EXPORT
+  (let [content (section "content")
+        captions (content "captions")
+        type (content "type")
+        media (await (model/get-download-links (content "id")))]
+
+    (string/join
+     "\n"
+     (into [] (for [{:keys [url ^Reference ref]} media
+                    :let [caption
+                          (if captions
+                            (captions (second
+                                       (string/split
+                                        (.-fullPath ref)
+                                        #"media/")))
+                            "")]]
+                (if (or (= "images" type)
+                        (= "camera" type))
+                  (str "![" caption "](" url ")" "\n" caption)
+                  (str "[" caption "](" url ")" "\n" caption)))))))
+
+(defn media2 [section]
+  ;;TODO ADD CAPTIONS TO EXPORT
+  (let [content (section "content")
+        captions (content "captions")
+        type (content "type")
+        media (content "url-names")]
+    
+    (string/join
+     "\n"
+     (into [] (for [{:strs [url name]} media
+                    :let [caption
+                          (string/trim (str (captions url)))]]
+                (if (#{"images" "camera" "draw"} type)
+                  (str "![" caption "](" url ")" "\n" caption)
+                  (str "[" caption "](" url ")" "\n" caption)))))))
+
+(defn voice-download-link [note-id section]
+  (let [ref (voice/make-remote-ref nil note-id (section "id"))
+        url (await (.getDownloadURL ref))]
+    (println "found url " url)
+    url))
+
+(defn voice [section note-id]
+  (let [download-link (await (voice-download-link note-id section))]
+    (str "# " (section "name")
+         "\n## Transcription\n" (or (get-in section ["content" "transcription"])
+                                    (get-in section ["content" "transcription2"]))
+         "\n## Download\n"
+         (str "[" "click to download" "](" download-link ")"))))
+
+(defn note-to-string [note timeformat-24-hours? gen-img?]
+  (let [title (model/default-title (:title note) (:plaintext note) (:created_at note) (:sections note)
+                                   (if (some? timeformat-24-hours?)
+                                     timeformat-24-hours?
+                                     true))
+        body (str
+              "# " title
+              (when (not= title
+                          (:plaintext note))
+                (str "\n"
+                     (:plaintext note)))
+              "\n## Tags\n" (string/join ", " (:tags note))
+              "\n## id" (:id note)
+              "\n"
+              (string/join "\n"
+                           (await (Future.wait
+                                   (mapv (fn [[section-id section]]
+                                           (let [section-name (section "name")]
+                                             (str "\n## " section-name "\n"
+                                                  (case (section "type")
+                                                    "list" (list section)
+                                                    "table" (table-md section)
+                                                    "voice" (await (voice section
+                                                                          (:id note)))
+                                                    
+                                                    "draw" "A nice drawing"
+                                                    "table2" (table2-md section)
+                                                    "text" (section "content")
+                                                    "media" (if gen-img? (await (media section)) "hidden media files")
+                                                    "media2" (media2 section)
+                                                    "reminder" (reminder section)
+                                                    section-name))))
+                                         (sort-by (fn [[_ {:strs [section-position]}]]
+                                                    section-position)
+                                                  (:sections note)))))))]
+    body))
+
+(defn note-to-string-with-title [note timeformat-24-hours? gen-img?]
+  (let [title (-> (model/default-title (:title note) (:plaintext note) (:created_at note) (:sections note)
+                                 (if (some? timeformat-24-hours?)
+                                   timeformat-24-hours?
+                                   true))
+                  (string/replace #"[|\\?*<\":>/,\.]" "")
+                  (string/replace #"\[|\]" "")        ;; Remove [ and ]
+                  (string/replace #" " "_")
+                  (string/replace #"-" "_")
+                  (string/replace #"/" "_")
+                  (string/replace #"\\" "_")
+                  (string/replace #"__" "_")
+                  (string/replace #"[^a-zA-Z0-9_\u0103\u0102\u00E2\u00C2\u00EE\u00CE\u0219\u0218\u021B\u021A]" ""))
+
+        s (await (note-to-string note timeformat-24-hours? gen-img?))]
+    {:title (model/safe-substring (if (> 5 (count title))
+                              (:id note)
+                              title)
+                            0 49)
+     :body s}))
+
+
