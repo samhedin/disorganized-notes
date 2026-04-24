@@ -9,7 +9,9 @@
 - [Code overview](#code-overview)
   - [The note object](#the-note-object)
   - [Working with a note](#working-with-a-note)
-  - [Create a sections](#create-a-sections)
+  - [Create a section](#create-a-section)
+- [Questions and Answers](#questions-and-answers)
+  - [I hate Firebase](#i-hate-firebase)
 - [Code of conduct](#code-of-conduct)
 - [Support the project](#support-the-project)
 
@@ -33,12 +35,10 @@ ClojureDart: https://github.com/Tensegritics/ClojureDart?tab=readme-ov-file#your
 
 Flutter: https://docs.flutter.dev/reference/create-new-app
 
-Then clone this repo and run `clj -M:cljd init` in the root.
-
 The web version should be easiest to get started with, then Android and lastly iOS.
 
 ## Firebase
-Disorganized uses many Firebase features, but to get started with development
+Disorganized uses many Firebase features, but to get started
 the most important ones are Firestore and Auth.
 
 1. Set up a project on Firebase: https://firebase.google.com/
@@ -58,7 +58,8 @@ Then navigate to `Firestore Database` and create these collections:
 4. `users`
 
 Then, switch to the rules tab and paste this (if required).
-This is just for development purposes, there is ZERO security here.
+
+**JUST FOR DEVELOPMENT PURPOSES, THIS LEAVES YOUR DATA IN THE OPEN**
 ```
 rules_version = '2';
 service cloud.firestore {
@@ -76,19 +77,17 @@ Next, run `firebase deploy --only firestore:indexes` to get the required indexes
 
 Finally, run `flutterfire configure` to generate `lib/firebase_options.dart` (gitignored, you generate it for your own Firebase project).
 
-The app uses revenuecat to handle subscriptions. Copy `lib/secrets.dart.example` to `lib/secrets.dart` and fill in your own keys from app.revenuecat.com. 
+The app uses revenuecat to handle subscriptions. Copy `lib/secrets.dart.example` to `lib/secrets.dart` and fill in your own keys from app.revenuecat.com. This is also in gitignore. 
 
 Finally, to run the web version you can use:
 `clj -M:cljd flutter -d chrome --web-port 7357 --web-hostname localhost`
+Running the mobile versions is also possible but will require more setup, see the flutter docs for more info.
 
 # Limitations of the open source build
 
 - Reminders won't work because they are sent via a cloud function with code that isn't open source (but just let me know if that's important to you and I'll help out).
 - media2 section requires cloud storage to work so you'll need to set that up.
 - The AI features requires Gemini which you can enable via firebase.
-
-All of the above require upgrading from the free firebase model.
-
 
 # Code overview
 The sections (tables, lists, etc) are inside `disorganized.ui.*`, for example `disorganized.ui.list`. 
@@ -128,13 +127,13 @@ Top level keys are turned into clojure keywords when loading the note since they
  ;;note id
  :id fff5d1b0-7061-474c-acfa-0bf0dd394e14,
  
- :user_access [&lt;user-id&gt;],  ;;my user id
+ :user_access [<UID>],
  :updated_at Timestamp(seconds=1767105405, nanoseconds=607000000), 
  :title hello, 
  :plaintext , 
  :created_at Timestamp(seconds=1767105383, nanoseconds=311000000), 
- :roles {&lt;user-id&gt; owner}, 
- :owner &lt;user-id&gt;}
+ :roles {<UID> owner}, 
+ :owner <UID>}
 ```
 
 ## Working with a note
@@ -142,8 +141,8 @@ Most code manipulates the current note somehow, and the standard way to make upd
 
 ```
 (rd/dispatch [::model/update-current-note
-                  (fn [m]
-                    (update-in m [:sections section-id "content"]
+                  (fn [note]
+                    (update-in note [:sections section-id "content"]
                               #(str % time)))])
 ```
 This will sync the note with firestore. 
@@ -160,6 +159,14 @@ To create a section:
 4. The section needs to be rendered on the homepage, see `ui.show-grid-note` and add `show-<section-name>`
 5. Add a stringify function to `prettyprint.cljd`, this is called when exporting notes to markdown. Call the function from `prettyprint/note-to-string`
 
+# Questions and Answers
+## I hate Firebase
+First, that's not a question.
+
+I think that multiplatform and real-time sync are essential for a good note-taking experience, and therefore the app is deeply integrated with Firestore. Replacing and redesigning all pieces that depend on Firebase/Firestore would take a fair chunk of work. Afer that, maintaining two separate versions is a big task in itself.
+I believe that it would be misguided to try to pull out Firebase, but if you absolutely want to do it I'm happy to provide pointers and guidance. No guarantee (in fact, it is unlikely) that I'd merge such code though.
+
+And unlike what some people believe, Firestore does not require constant connectivity to function.
 
 # Code of conduct
 ![no bulli allowed](https://github.com/user-attachments/assets/56ab62aa-deed-4569-b245-7b4f42f9e64c)
