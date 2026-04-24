@@ -1,3 +1,11 @@
+# Disorganized: Notes & Todo
+A note-taking app that supports tables, lists, reminders, timers, alarms, images, and much more.
+
+[Android](https://play.google.com/store/apps/details?id=com.disorganized.disorganized&pli=1&gl=cn), [iOS](https://apps.apple.com/us/app/disorganized-notes-todo/id6738280174), [web (requires subscription)](https://app.getdisorganized.com/)
+
+<img width="258" height="559" alt="2" src="https://github.com/user-attachments/assets/dd56db14-5e9c-44f1-b12b-ad1eddd0e832" />
+
+
 <!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
 **Table of Contents**
 
@@ -17,14 +25,6 @@
 
 <!-- markdown-toc end -->
 
-# Disorganized
-A note-taking app! Try it out:
-
-[Android](https://play.google.com/store/apps/details?id=com.disorganized.disorganized&pli=1&gl=cn)
-
-[iOS](https://apps.apple.com/us/app/disorganized-notes-todo/id6738280174)
-
-[web (requires subscription)](https://app.getdisorganized.com/)
 
 # On open sourcing
 Disorganized has been a closed-source private project since its inception, and
