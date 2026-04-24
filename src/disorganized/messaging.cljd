@@ -12,7 +12,8 @@
    [disorganized.model :as model]
    ["package:flutter/foundation.dart" :refer [kIsWeb kDebugMode kProfileMode]]
    ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions]]
-   ["dart:io" :refer [Platform]]))
+   ["dart:io" :refer [Platform]]
+   ["package:disorganized_notes/secrets.dart" :as secrets]))
 
 (defn postpone-notification [duration
                              {:strs [section-id note-id description] :as m}]
@@ -159,8 +160,7 @@
           (AwesomeNotificationsFcm)
           .onFcmSilentDataHandle background-handler
           .onFcmTokenHandle fcm-token-handler
-          .licenseKeys ["REMOVED"
-                        "REMOVED"])))
+          .licenseKeys secrets/fcmLicenseKeys)))
 
 (defn initialize []
   (.initialize (notif/AwesomeNotifications)
