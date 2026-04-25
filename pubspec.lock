@@ -838,9 +838,11 @@ packages:
   flutter_mind_map:
     dependency: "direct main"
     description:
-      path: flutter_mind_map
-      relative: true
-    source: path
+      path: "."
+      ref: HEAD
+      resolved-ref: c428c41bcec38d2a62b2a7673c8f700341654963
+      url: "https://github.com/samhedin/flutter_mind_map"
+    source: git
     version: "1.1.2"
   flutter_native_splash:
     dependency: "direct main"
