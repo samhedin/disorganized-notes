@@ -1453,7 +1453,14 @@ Use cloning to copy over sections and tags to a new note."))])
                            only-with-section)))
              note)))
        saved-notes-strings)
-      saved-notes)))
+      (filter
+       (fn [note]
+         (let [tags (set (:tags note))
+               tag-filtered? (every? tags selected-tags)]
+           (and tag-filtered?
+                (or (nil? only-with-section)
+                    (model/note-contains-section? note only-with-section)))))
+       saved-notes))))
 
 (defn list-title [text tthm]
   (f/widget
