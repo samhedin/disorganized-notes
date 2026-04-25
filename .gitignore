@@ -212,10 +212,12 @@ secrets.dart
 .clojuredart/
 lib/cljd-out/
 test/cljd-out/
-android/
-ios/
-linux/
-macos/
-web/
-windows/
-/analysis_options.yaml
+
+# Private files symlinked from disorganized (private repo)
+android/fastlane/
+ios/fastlane/
+Gemfile
+Gemfile.lock
+ios/*.p12
+ios/*.pem
+ios/*.pkey
