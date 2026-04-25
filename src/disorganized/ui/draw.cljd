@@ -209,13 +209,7 @@
  
    
    :bg-watcher ([input-method *input-method]
-                (if (= "all" input-method)
-                  (.setAllowedPointersMode
-                   notifier
-                   scribble/ScribblePointerMode.all)
-                  (.setAllowedPointersMode
-                   notifier
-                   scribble/ScribblePointerMode.mouseAndPen)))
+                nil)
 
    :bg-watcher ([{{:strs [stroke-width ]} section-name}
                  (rd/subscribe [::model/current-sections])]
@@ -225,13 +219,7 @@
    :let [height 500
          scribbler (m/Listener
                     .onPointerDown (fn [event]
-                                     (let [stylus? (= (.-kind event)
-                                                      PointerDeviceKind.stylus)]
-                                       (when stylus?
-                                         (reset! *input-method "stylus")
-                                         (.setAllowedPointersMode
-                                          notifier
-                                          scribble/ScribblePointerMode.mouseAndPen))))
+                                     nil)
                     .child
                     (scribble/Scribble
                      .notifier notifier
