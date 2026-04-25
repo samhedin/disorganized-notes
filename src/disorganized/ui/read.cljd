@@ -1247,6 +1247,7 @@ Use cloning to copy over sections and tags to a new note."))])
         yesterday-start (.subtract today-start (Duration .days 1))
         week-start (.subtract today-start (Duration .days (.weekday now)))
         last-week-start (.subtract week-start (Duration .days 7))
+        last-year-start (DateTime (- (.-year now) 1) (+ (.-month now) 1) 1)
         fmt (intl/DateFormat "MMMM")
 
         groups (group-by (fn [note]
@@ -1254,18 +1255,22 @@ Use cloning to copy over sections and tags to a new note."))])
                              (cond
                                (.isAfter updated today-start) "Today"
                                (.isAfter updated week-start) "This week"
-                               :else (.format fmt updated)))) notes)
+                               (.isAfter updated last-year-start) (.format fmt updated)
+                               :else "Last year"))) notes)
 
         recent-periods [["Today" (groups "Today")]
                         ["This week" (groups "This week")]]
 
-        month-groups (->> (dissoc groups "Today" "This week")
+        month-groups (->> (dissoc groups "Today" "This week" "Last year")
                           (map (fn [[month-key month-notes]]
                                  [month-key month-notes (-> month-notes first :updated_at)]))
                           (sort-by #(nth % 2) (fn [a b] (.isAfter a b)))
-                          (map (fn [[month-key month-notes _]] [month-key month-notes])))]
+                          (map (fn [[month-key month-notes _]] [month-key month-notes])))
 
-    (->> (concat recent-periods month-groups)
+        last-year (when (seq (groups "Last year"))
+                    [["Last year" (groups "Last year")]])]
+    
+    (->> (concat recent-periods month-groups last-year)
          (filter (fn [[_ notes]] (seq notes)))
          (into []))))
 
