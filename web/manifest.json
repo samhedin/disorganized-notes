@@ -1,11 +1,11 @@
 {
-    "name": "disorganized_notes",
-    "short_name": "disorganized_notes",
+    "name": "disorganized",
+    "short_name": "disorganized",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "Notes, todos, and much more",
+    "description": "Messy notes for messy people",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
