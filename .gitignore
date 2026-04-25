@@ -214,10 +214,17 @@ lib/cljd-out/
 test/cljd-out/
 
 # Private files symlinked from disorganized (private repo)
+firebase.json
+android/app/google-services.json
 android/fastlane/
+android/key.jks
+android/key.properties
+ios/Runner/GoogleService-Info.plist
 ios/fastlane/
-Gemfile
-Gemfile.lock
 ios/*.p12
 ios/*.pem
 ios/*.pkey
+web/firebase-messaging-sw.js
+web/index.html
+Gemfile
+Gemfile.lock
