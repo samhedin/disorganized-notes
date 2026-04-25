@@ -1571,7 +1571,7 @@ Use cloning to copy over sections and tags to a new note."))])
 
                          ;;Just for development.
                          (m/SliverVisibility
-                          .visible (and true kDebugMode)
+                          .visible (and false kDebugMode)
                           .sliver (m/SliverToBoxAdapter
                                    .child (click-me-button)))
 
