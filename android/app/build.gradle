@@ -1,0 +1,104 @@
+plugins {
+    id "com.android.application"
+    // START: FlutterFire Configuration
+    id 'com.google.gms.google-services'
+    id 'com.google.firebase.crashlytics'
+    // END: FlutterFire Configuration
+    id "kotlin-android"
+    // Compose Compiler Plugin (required for Kotlin 2.0+)
+    id "org.jetbrains.kotlin.plugin.compose"
+    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+android {
+    namespace = "com.disorganized.disorganized"
+    compileSdk = flutter.compileSdkVersion
+    ndkVersion = flutter.ndkVersion
+
+       lint {
+        disable 'NullSafeMutableLiveData'
+    }
+
+    compileOptions {
+          coreLibraryDesugaringEnabled true
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_21
+    }
+
+    defaultConfig {
+        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
+        applicationId = "com.disorganized.disorganized"
+        // You can update the following values to match your application needs.
+        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        minSdkVersion 29
+	
+	multiDexEnabled true
+        //minSdk = flutter.minSdkVersion
+	
+	// "One or more of the APIs you use or parameters that you set for edge-to-edge and window display have been deprecated in Android 15. 
+	// https://github.com/flutter/flutter/issues/160328
+	// https://github.com/flutter/flutter/issues/163545
+        targetSdk = 35
+	
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+    signingConfigs {
+        release {
+            keyAlias = 'upload'
+            keyPassword = keystoreProperties['keyPassword']
+            storeFile = keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+            storePassword = keystoreProperties['storePassword']
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+	    minifyEnabled true
+	    shrinkResources false
+	    proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    buildFeatures {
+        viewBinding true
+        // Enable Compose support for Jetpack Glance
+        compose true
+    }
+}
+
+flutter {
+    source = "../.."
+}
+
+dependencies {
+    implementation 'com.facebook.infer.annotation:infer-annotation:0.18.0'
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
+    implementation 'com.google.ads.mediation:facebook:6.19.0.1'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
+    implementation 'androidx.window:window:1.0.0'
+    implementation 'androidx.window:window-java:1.0.0'
+    implementation 'com.android.billingclient:billing:6.0.1'
+    
+    // Jetpack Glance dependencies
+    implementation 'androidx.glance:glance-appwidget:1.1.0'
+    implementation 'androidx.compose.ui:ui:1.6.0'
+    implementation 'androidx.compose.material3:material3:1.2.0'
+
+
+}
+
+repositories {
+    mavenCentral()
+}
