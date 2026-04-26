@@ -1,5 +1,6 @@
 (ns disorganized.ui.timer
   (:require
+   ["package:firebase_ai/firebase_ai.dart" :as ai]
    ["package:pulsator/pulsator.dart" :as pulsator]
    ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
    ["package:circular_countdown_timer/circular_countdown_timer.dart" :as ct]
@@ -25,6 +26,28 @@
    [disorganized.model :as utils]
    ["package:flutter/material.dart" :as m]
    [cljd.flutter :as f]))
+
+
+(def schema-keys
+  {"seconds" (ai/Schema.integer
+              .description "seconds in timer")
+
+   "minutes" (ai/Schema.integer
+              .description "minutes in timer")
+
+   "hours" (ai/Schema.integer
+            .description "Hours in timer")
+
+   "description" (ai/Schema.string
+                  .description "Any additional information")})
+
+(def schema
+  (ai/Schema.object
+   .title "timer"
+   .properties
+   (dutils/stringKeys
+    schema-keys)))
+
 
 (def max-height 200)
 

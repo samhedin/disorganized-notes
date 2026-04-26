@@ -139,7 +139,7 @@
    .context ctx
    .builder
    (f/build
-    :get [m/Navigator m/ScaffoldMessenger]
+    :get [m/Navigator m/ScaffoldMessenger m/MediaQuery]
     :get {{tthm .-textTheme} m/Theme}
     :managed [tc (m/TextEditingController)]
     :watch [current-note (rd/subscribe [::model/current-note])]
@@ -149,30 +149,27 @@
 
     (m/AlertDialog
      .content
-     (m/Column
-      .mainAxisSize m/MainAxisSize.min
-      .crossAxisAlignment m/CrossAxisAlignment.start
-      .children
-      (concat
+     (m/Container
+      .width (- (-> media-query .-size .-width) 100)
+      .child 
+      (m/Column
+       .mainAxisSize m/MainAxisSize.min
+       .crossAxisAlignment m/CrossAxisAlignment.start
+       .children
        [(m/Align
          .alignment m/Alignment.center
          .child (m/Text "Generate a section using AI"
-                        .style (.-titleMedium tthm)))]
-
-       [(f/widget
-         :padding {:vertical 12}
-         (m/Text "This feature will share this note with a third party AI provider.
-Click Cancel if you're not cool with that."
-                 .style (.merge
-                         (.-bodySmall tthm)
-                         (theme/faded-text-style brightness))))
+                        .style (.-titleMedium tthm)))
         (m/TextField
          .maxLines nil
+         .minLines 3
          .autocorrect true
          .textCapitalization m/TextCapitalization.sentences
-         .maxLength 300
+         .maxLength 5000
          .decoration (m/InputDecoration
-                      .hintText "Example: Write a chickpea recipe."
+                      .hintText "Examples: 
+- Make a leg workout
+- Convert this recipe to metric"
                       .hintStyle (.-bodySmall tthm))
          .controller tc)
         (m/Text "Select what to generate"
