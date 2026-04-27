@@ -175,6 +175,12 @@ I believe that it would be misguided to try to pull out Firebase, but if you abs
 
 And unlike what some people believe, Firestore does not require constant connectivity to function.
 
+### I don't trust Firestore/Firebase
+By default notes are encrypted at rest. If you want double security you can encrypt your notes on your device, there is already limited support for it.
+You can just extend the encryption to support the things you care about - it will be easier than swapping out
+the hosting entirely.
+
+
 # Code of conduct
 ![no bulli allowed](https://github.com/user-attachments/assets/56ab62aa-deed-4569-b245-7b4f42f9e64c)
 
