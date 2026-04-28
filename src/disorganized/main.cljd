@@ -622,7 +622,7 @@
 (when (not kDebugMode)
    (init-analytics))
   (init-remote-config)
-  ;(init-appcheck)
+  (init-appcheck)
 
   (add-brightness-observer)
   (rd/register-defaults!)
