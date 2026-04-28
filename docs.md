@@ -1,3 +1,14 @@
+<!-- markdown-toc start - Don't edit this section. Run M-x markdown-toc-refresh-toc -->
+**Table of Contents**
+
+- [Code overview](#code-overview)
+  - [The note](#the-note)
+  - [Working with a note](#working-with-a-note)
+- [Sections](#sections)
+  - [Create a section](#create-a-section)
+- [What is OverlayPortal?](#what-is-overlayportal)
+
+<!-- markdown-toc end -->
 
 
 # Code overview
