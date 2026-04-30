@@ -18,8 +18,6 @@ The main file for the start-page, the list of notes, is inside `read.cljd`, whil
 
 Global data, state management and utils are inside `model.cljd`.
 
-The screen that lists all notes is unintuitively named `read.cljd`.
-
 ## The note
 Below is a a basic note containing just a `Text` section.
 
