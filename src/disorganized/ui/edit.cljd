@@ -471,7 +471,7 @@
    (m/TextField
     .style (.-titleLarge tthm)
     .decoration (m/InputDecoration
-                 .hintText (if tutorial? "Title of your first note" "Title")
+                 .hintText "Title"
                  .hintStyle (theme/faded-text-style brightness)
                  .border m/InputBorder.none)
     .autocorrect true
@@ -542,7 +542,7 @@
      .border m/InputBorder.none
      .focusedBorder m/InputBorder.none
      .enabledBorder m/InputBorder.none
-     .hintText (if tutorial? "Free text goes here!" "Free text")
+     .hintText "Free text"
      .hintStyle (theme/faded-text-style brightness))
     .onTapOutside
     (fn [_]
@@ -1586,12 +1586,12 @@ Writing a recipe? Add a recipe tag.")))
            .children
            (concat
             [(m/Text
-              "Clone for reuse"
+              "Every note is a template"
               .style (.-titleLarge tthm))
              (m/SizedBox .height 12)
              (m/Align
               .alignment m/Alignment.bottomLeft
-              .child (m/Text "Clone to create a similar note."
+              .child (m/Text "If you ever want to make a similar note, you can clone this one to copy over all sections and tags to a new note."
                              .style (.-bodyLarge tthm)))
              (m/Align
               .alignment m/Alignment.bottomRight
