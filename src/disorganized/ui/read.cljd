@@ -338,7 +338,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
        .crossAxisAlignment m/CrossAxisAlignment.start
        .mainAxisAlignment m/MainAxisAlignment.end
        .children
-       [(model/outline button)
+       [button
         (m/SizedBox
          .width button-size
          .child (tutorial/example-notes-popup false))
