@@ -297,8 +297,8 @@
                     .index @index
                     .alignment 0.0
                     .duration (fn [distance]
-                                (Duration .milliseconds (min (/ distance 2)
-                                                             1000)))
+                                (Duration .milliseconds (int (min (/ distance 2)
+                                                                  1000))))
                     .curve (fn [distance]
                              m/Curves.easeInOut))))))
 
