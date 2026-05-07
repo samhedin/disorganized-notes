@@ -1650,9 +1650,8 @@ Writing a recipe? Add a recipe tag.")))
                             .maxWidth 350)
 
               .onChanged (fn [text]
-                           (reset! *text-search text)
-                           (when (= "" text)
-                             (swap! *expanded-searchbar not))))
+                           (reset! *text-search text)))
+             
              (m/IconButton
               .icon (m/Icon m/Icons.search
                             .color (.-onSurfaceVariant cs))

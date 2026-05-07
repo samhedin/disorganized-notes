@@ -859,9 +859,11 @@ Leading \"-\" will be stripped."
               hits))]
       result)))
 
-(defn reorderable-list [items section-id item-is-checked? parent-location text-search]
+(defn reorderable-list [items section-id item-is-checked? parent-location]
   (f/widget
    :get [m/ScaffoldMessenger]
+    :get [:*text-search  :text-search]
+
    :watch [{{:strs [checkboxes-visible]} section-id}
            (rd/subscribe [::model/current-sections])]
    :watch [filtered-items (atom (if (string/blank? text-search)
@@ -870,8 +872,8 @@ Leading \"-\" will be stripped."
                                    (fn [item]
                                      (string/includes?
                                       (string/lower-case (item "data"))
-                                      text-search)) items))) :as *filtered-items
-           :refresh-on items]
+                                      text-search)) items))) :as *filtered-items]
+
    (m/ReorderableListView.builder
     .onReorderStart (fn [_]
                       (.unfocus (.-primaryFocus (.instance m/FocusManager))))
@@ -1157,14 +1159,14 @@ Leading \"-\" will be stripped."
                  (m/Wrap
                   .children (map model/url-button urls))))])
 
-     [(reorderable-list (item "children") section-id item-is-checked? location text-search)]))))
+     [(reorderable-list (item "children") section-id item-is-checked? location)]))))
 
-(defn top-level-reorderable-list [item-is-checked? section-id text-search]
+(defn top-level-reorderable-list [item-is-checked? section-id]
   (f/widget
    :watch [{{:strs [content checkboxes-visible checked-content]} section-id}
            (rd/subscribe [::model/current-sections])]
    :let [content (if item-is-checked? checked-content content)]
-   (reorderable-list content section-id item-is-checked? [] text-search)))
+   (reorderable-list content section-id item-is-checked? [])))
 
 (defn showlist
   [section-id text-search]
@@ -1178,7 +1180,7 @@ Leading \"-\" will be stripped."
     .crossAxisAlignment m/CrossAxisAlignment.stretch
     .mainAxisSize m/MainAxisSize.min
     .children
-    [(top-level-reorderable-list false section-id text-search)
+    [(top-level-reorderable-list false section-id)
      (m/SizedBox .height 5)
      (f/widget
       (m/Visibility
@@ -1269,4 +1271,4 @@ Leading \"-\" will be stripped."
                    false
                    true)
                  (boolean checked-lists-start-expanded)))
-             .children [(top-level-reorderable-list true section-id text-search)])]))))])))
+             .children [(top-level-reorderable-list true section-id)])]))))])))
