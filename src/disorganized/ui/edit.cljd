@@ -290,8 +290,6 @@
     (Future/delayed
      (Duration .milliseconds 50)
      (fn []
-       (println "jumping " section-list-controller scroll-controller @index)
-       
        (.animateToItem section-list-controller
                     .scrollController scroll-controller
                     .index @index
