@@ -229,6 +229,7 @@ Leading \"-\" will be stripped."
      .actions [(m/TextButton
                 .onPressed #(.pop navigator)
                 .child (m/Text "Cancel"))
+               
                (m/TextButton
                 .onPressed (fn []
                              (let [lines (filter #(not (string/blank? %))
@@ -236,14 +237,19 @@ Leading \"-\" will be stripped."
                                (rd/dispatch [::model/update-current-note
                                              (fn [m]
                                                (update-in m [:sections section-id "content"]
-                                                          #(concat %
-                                                                   (map (fn [l]
-                                                                          {"id" (str (random-uuid))
-                                                                           "children" []
-                                                                           "data" (string/trim
-                                                                                   (if (string/starts-with? l "-")
-                                                                                     (subs l 1)
-                                                                                     l))}) lines))))]))
+                                                          (fn [content]
+                                                            (into []
+                                                                  (concat (filter (fn [{:strs [data]}]
+                                                                                    (not (string/blank? data)))
+                                                                                  content)
+                                                                          
+                                                                          (map (fn [l]
+                                                                                 {"id" (str (random-uuid))
+                                                                                  "children" []
+                                                                                  "data" (string/trim
+                                                                                          (if (string/starts-with? l "-")
+                                                                                            (subs l 1)
+                                                                                            l))}) lines))))))]))
                              (.pop navigator))
                 .child (m/Text "Parse!"))]))))
 
