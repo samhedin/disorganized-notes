@@ -1176,7 +1176,7 @@ Writing a recipe? Add a recipe tag.")))
   (f/widget
    :get [:*expanded-searchbar]
    (m/Visibility
-    .visible (not @*expanded-searchbar))
+    .visible (or kIsWeb (not @*expanded-searchbar)))
    (m/Flexible
     .child
     child)))
@@ -1190,8 +1190,7 @@ Writing a recipe? Add a recipe tag.")))
 
    :get {{cs .-colorScheme} m/Theme}
    (m/Visibility
-    .visible (and (< 1 (count sections))
-                  (not @*expanded-searchbar))
+    .visible (not @*expanded-searchbar)
     .child
     (m/PopupMenuButton
      .tooltip "Jump to section"
@@ -1709,7 +1708,7 @@ Writing a recipe? Add a recipe tag.")))
             enable-clone-highlight? (rd/subscribe [::model/enable-clone-highlight])]
     :get {{cs .-colorScheme} m/Theme}
     (m/Visibility
-     .visible (not @*expanded-searchbar))
+     .visible (or kIsWeb (not @*expanded-searchbar)))
     (m/Tooltip
      
      .message "Go back (notes are autosaved)")
