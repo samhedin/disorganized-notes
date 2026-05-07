@@ -31,7 +31,7 @@ Visit our [Discord!](https://discord.gg/UEeughB9Qn)
 [READ HERE](docs.md)
 
 # On open sourcing
-Disorganized has been a closed-source private project since its inception, and
+Disorganized has been a closed-source one-man project since its inception, and
 some parts of the codebase are consequences of that. I'll clean it up with time.
 
 # Prerequisites
