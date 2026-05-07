@@ -1618,7 +1618,8 @@ Writing a recipe? Add a recipe tag.")))
 
 (defn in-note-search [*text-search]
   (f/widget
-   :managed [tc (m/TextEditingController)]
+   :managed [tc (m/TextEditingController)
+             search-focus (m/FocusNode)]
    :get {{cs .-colorScheme} m/Theme}
 
    :get [:*expanded-searchbar]
@@ -1626,6 +1627,7 @@ Writing a recipe? Add a recipe tag.")))
     .duration (Duration .milliseconds 300)
     .child (if @*expanded-searchbar
              (m/SearchBar
+              .focusNode search-focus
               .controller tc
               .elevation (m/MaterialStateProperty.all 0.0)
               .autoFocus true
@@ -1636,6 +1638,12 @@ Writing a recipe? Add a recipe tag.")))
                         (fn []
                           (.-text! tc "")
                           (reset! *text-search "")
+                          (when (not @*expanded-searchbar)
+                            (Future/delayed
+                             (Duration .milliseconds 305)
+                             (fn []
+                               (.requestFocus search-focus))))
+                          
                           (swap! *expanded-searchbar not)))
 
               .trailing [(m/IconButton
