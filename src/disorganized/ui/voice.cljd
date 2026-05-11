@@ -4,6 +4,7 @@
    ["package:flutter_recorder/flutter_recorder.dart" :refer [Recorder PCMFormat]]
    ["package:just_audio/just_audio.dart" :as ja]
    ["package:firebase_ai/firebase_ai.dart" :as ai]
+   ["package:firebase_app_check/firebase_app_check.dart" :refer [FirebaseAppCheck AndroidProvider AppleProvider ReCaptchaV3Provider]]
    ["dart:convert" :as c]
    ["dart:io" :refer [Platform]]
    ["package:firebase_storage/firebase_storage.dart" :refer [FirebaseStorage SettableMetadata TaskState]]
@@ -79,7 +80,8 @@
                              ".m4a"))))
 
 (defn transcribe [file]
-  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI
+                                 .appCheck FirebaseAppCheck.instance)
                                 .model model/gemini-model
                                 .generationConfig
                                 (ai/GenerationConfig

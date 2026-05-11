@@ -2,6 +2,7 @@
   (:require
    [disorganized.ui.image-carousel2 :as carousel2]
    ["package:firebase_ai/firebase_ai.dart" :as ai]
+   ["package:firebase_app_check/firebase_app_check.dart" :refer [FirebaseAppCheck AndroidProvider AppleProvider ReCaptchaV3Provider]]
    ["package:mime/mime.dart" :refer [lookupMimeType]]
    ["package:share_plus/share_plus.dart" :refer [XFile Share ShareParams SharePlus]]
    ["package:just_audio/just_audio.dart" :as ja]
@@ -30,7 +31,8 @@
    [cljd.flutter :as f]))
 
 (defn ai-create-image [prompt]
-  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI
+                                 .appCheck FirebaseAppCheck.instance)
                                 .model "gemini-2.5-flash-image"
                                 .generationConfig
                                 (ai/GenerationConfig

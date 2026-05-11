@@ -1,5 +1,6 @@
 (ns disorganized.ui.list
   (:require
+   ["package:firebase_app_check/firebase_app_check.dart" :refer [FirebaseAppCheck AndroidProvider AppleProvider ReCaptchaV3Provider]]
    ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions FieldValue]]
    ["dart:convert" :as c]
    ["package:disorganized_notes/utils.dart" :as dutils]
@@ -63,7 +64,8 @@
   (mapv add-ids (response "items")))
 
 (defn ai-create [prompt]
-  (let [model (.generativeModel (ai/FirebaseAI.googleAI)
+  (let [model (.generativeModel (ai/FirebaseAI.googleAI
+                                 .appCheck FirebaseAppCheck.instance)
                                 .model model/gemini-model
                                 .generationConfig
                                 (ai/GenerationConfig
