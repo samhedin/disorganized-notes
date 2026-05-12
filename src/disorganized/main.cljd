@@ -648,7 +648,7 @@
                           (reader/read-string (.-payload (.-first alarms)))]
 
                       (.pushNamed router "edit"
-                                  .pathParameters {"id" note-id}
+                                  .pathParameters (dutils/convertToStr {"id" note-id})
                                   .extra {:jumpto section-position
                                           :autofocus false})))))
 
