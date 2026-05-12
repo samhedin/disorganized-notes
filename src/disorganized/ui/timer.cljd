@@ -480,7 +480,7 @@
                                         ;because it will auto stop and apparently that screws everything up.
                                      ;;not sure what's going
                                    (await (.stop alarm/Alarm alarm-id))
-
+                                   (model/request-notification-permission true)
                                    (await (dutils/checkAndroidScheduleExactAlarmPermission))
                                    (rd/dispatch [::model/schedule-alarm section-id])))
 
