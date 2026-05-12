@@ -95,7 +95,6 @@
                      rc
                      {"use_appcheck" "false"})
                     (fn [_]
-                      (println "activating rc")
                       (.fetchAndActivate rc)))))))
 
 (defn add-brightness-observer []
@@ -325,7 +324,6 @@
            :context ctx
            :bg-watcher ([{uid .-uid
                           email .-email} (.authStateChanges FirebaseAuth.instance)]
-                        (println "SIGNUPDEBUGGING main " uid)
                         (if uid
                           (do
                             (rd/dispatch [::model/refresh-notes])

@@ -739,7 +739,6 @@
                       entitlements (into {} (.-all (-> info .-entitlements)))]
                   (when (seq entitlements)
                     (.-isActive (entitlements "full-access")))))]
-    (println "setting premium: " status)
     (rd/dispatch [::set-key :premium? status])))
 
 (defn init-revenuecat- [user-id]
@@ -1307,7 +1306,6 @@
         (:sections note)))
 
 (defn upload-token [token uid]
-  (println "upload token " uid)
   (let [device-ref (.doc (FirebaseFirestore.instance.collection "devices")
                          uid)
         tokens {"tokens"

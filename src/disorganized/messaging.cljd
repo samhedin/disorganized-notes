@@ -137,7 +137,6 @@
 
 ^{:annotations [^:unique (pragma "vm:entry-point")]}
 (defn  ^#/(Future void) fcm-token-handler [token]
-  (println "received fcm token" (some? token))
   (let [uid (model/uid)
         device-ref (.doc (FirebaseFirestore.instance.collection "devices")
                          uid)

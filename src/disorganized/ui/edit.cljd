@@ -1552,7 +1552,6 @@ Writing a recipe? Add a recipe tag.")))
    :managed [controller (m/OverlayPortalController) :dispose nil]
 
    :bg-watcher ([enable-clone-highlight? (rd/subscribe [::model/enable-clone-highlight])]
-                (println "enable clone highlight " enable-clone-highlight?)
                 (if enable-clone-highlight?
                   (.show controller)
                   (.hide controller)))
