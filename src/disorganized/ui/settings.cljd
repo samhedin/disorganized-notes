@@ -795,7 +795,6 @@ The web version only supports the latter.")
             (m/SizedBox .height 4)
             (m/Text "Export all notes to Markdown.\nThis can be shared with e.g Google Docs for export to PDF, printing, and editing.")
             (m/SizedBox .height 4)
-            
             (f/widget
              :get [m/ScaffoldMessenger :timeformat-24-hours]
              :watch [all-notes (rd/subscribe [::model/get-notes])]
@@ -803,7 +802,21 @@ The web version only supports the latter.")
               (m/Text "Export to Markdown")
               (fn []
                 (await (batch-export all-notes timeformat-24-hours scaffold-messenger ctx))
-                nil)))]
+                nil)))
+            (m/SizedBox .height 24)
+             (m/Text "Open Source"
+                    .style (.-titleLarge tthm))
+            (m/SizedBox .height 4)
+            (m/Text "We value your trust. Click below to view the source code to Disorganized.")
+            (m/SizedBox .height 4)
+            (m/ElevatedButton
+             .child (m/Text "GitHub repository")
+             .onPressed (fn []
+                          (url/launch "https://github.com/samhedin/disorganized-notes/tree/main")
+                          nil))
+            (m/SizedBox .height 24)
+
+            ]
 
            
 
