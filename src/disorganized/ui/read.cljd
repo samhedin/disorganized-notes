@@ -1462,10 +1462,9 @@ Use cloning to copy over sections and tags to a new note."))])
                     (model/note-contains-section? note only-with-section)))))
        saved-notes))))
 
-(defn list-title [text tthm]
+(defn list-title [text]
   (f/widget
-   :watch [brightness (rd/subscribe [::model/get-brightness])]
-
+   :get {{tthm .-textTheme} m/Theme}
    :padding {:top 20
              :bottom 12
              :left 16}
@@ -1526,7 +1525,7 @@ Use cloning to copy over sections and tags to a new note."))])
              (flatten
               (map (fn [[date-group notes]]
                      (concat
-                      [(list-title date-group tthm)]
+                      [(list-title date-group)]
                       (flatten (map-indexed
                                 (fn [i n]
                                   (concat
@@ -1545,7 +1544,7 @@ Use cloning to copy over sections and tags to a new note."))])
              ;;Pinned-notes contains both the actual notes, as well as the
              ;;pinned/unpinned icons.
              pinned-notes (flatten (concat
-                                    [(list-title "Pinned" tthm)]
+                                    [(list-title "Pinned")]
                                     (when (seq pinned)
                                       (map-indexed
                                        (fn [i n]
