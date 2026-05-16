@@ -24,8 +24,38 @@
    [disorganized.ui.popup :as popup]
    [hti.re-dash.alpha :as rd]
    [disorganized.model :as utils]
+   ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
    ["package:flutter/material.dart" :as m]
    [cljd.flutter :as f]))
+
+(defn set-alarm-notification [date section note-id]
+  (let [tz (await (.getLocalTimeZoneIdentifier
+                   (notif/AwesomeNotifications)))]
+    (await
+     (.createNotification
+      (notif/AwesomeNotifications)
+
+      .content
+      (notif/NotificationContent
+       .id (.hashCode (section "id"))
+       .channelKey "reminder_channel"
+       .title "Alarm!"
+       .body (model/safe-substring description 0 100)
+       .payload m
+       .wakeUpScreen true
+       .category notif/NotificationCategory.Alarm)
+
+      .actionButtons [(notif/NotificationActionButton
+                       .showInCompactView true
+                       .actionType notif/ActionType.SilentAction
+
+                       .key "stop"
+                       .label "Stop")]
+      .schedule
+      (notif/NotificationCalendar.fromDate
+       .date date
+       .allowWhileIdle true
+       .preciseAlarm true)))))
 
 (defn schedule-alarm [date note-id section scaffold-messenger]
   (let [description (section "name")
@@ -36,7 +66,7 @@
                              :section-position (section "section-position")})
 
                   .androidFullScreenIntent false
-                  .id (.hashCode (section "id"))
+                  .id (+ (.hashCode (section "id")) 54)
                   .loopAudio true
                   .vibrate true
                   .dateTime date
@@ -51,6 +81,7 @@
                                          .title (section "name")
                                          .body (or description "Alarm!")
                                          .stopButton "Stop"))]
+    (await (set-alarm-notification date section note-id))
     (await (alarm/Alarm.set
             .alarmSettings settings))
     nil))
