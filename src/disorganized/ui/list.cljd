@@ -470,10 +470,12 @@ Leading \"-\" will be stripped."
                    (subs text 1)
                    text)
             location (confirm-location note location id section-id)]
-        (update-in note
-                   (location->position section-id location)
-                   (fn [m]
-                     (assoc m "data" text)))))])
+        (if location
+          (update-in note
+                     (location->position section-id location)
+                     (fn [m]
+                       (assoc m "data" text)))
+          note)))])
 
   nil)
 
@@ -533,30 +535,32 @@ Leading \"-\" will be stripped."
   (rd/dispatch
    [::model/update-current-note
     (fn [m]
-      (let [location (confirm-location
-                      m
-                      location
-                      id
-                      section-id
-                      true)
-            position (location->position section-id location true)
+      (if-let [location (confirm-location
+                         m
+                         location
+                         id
+                         section-id
+                         true)]
+        (let [position (location->position section-id location true)
 
-            path [:sections section-id "checked-content" (first location)]
+              path [:sections section-id "checked-content" (first location)]
 
               ;;Uncheck the node that was clicked
-            m-unchecked (update-in m position #(assoc % "checkbox" false))
+              m-unchecked (update-in m position #(assoc % "checkbox" false))
 
               ;;The item that was clicked
-            item (get-in m-unchecked path)
+              item (get-in m-unchecked path)
 
               ;;Remove from checked-content
-            m' (update-in m-unchecked (butlast path)
-                          #(model/vec-remove % (first location)))]
+              m' (update-in m-unchecked (butlast path)
+                            #(model/vec-remove % (first location)))]
 
-        (update-in  m' ;;Uncheck the root node and add to content
-                    [:sections section-id "content"]
-                    #(conj % (-> item
-                                 (assoc "checkbox" false))))))]))
+          (update-in  m' ;;Uncheck the root node and add to content
+                      [:sections section-id "content"]
+                      #(conj % (-> item
+                                   (assoc "checkbox" false)))))
+        ;;if no location found, don't update the note.
+        m))]))
 
 (defn all-children-checked?
   "Returns true if all descendants (children, grandchildren, etc.) have checkbox = true"
@@ -579,42 +583,43 @@ Leading \"-\" will be stripped."
 
     (rd/dispatch [::model/update-current-note
                   (fn [note]
-                    (let [location (confirm-location
-                                    note
-                                    location
-                                    id
-                                    section-id)
+                    (if-let [location (confirm-location
+                                       note
+                                       location
+                                       id
+                                       section-id)]
+                      (let [position (location->position section-id location)
+                            note' (update-in note
+                                             position
+                                             (fn [content]
+                                               (set-checkbox-recursively content newval)))
 
-                          position (location->position section-id location)
-                          note' (update-in note
-                                           position
-                                           (fn [content]
-                                             (set-checkbox-recursively content newval)))
+                            root-note (location->position
+                                       section-id
+                                       [(first location)])
 
-                          root-note (location->position
-                                     section-id
-                                     [(first location)])
+                            node-checked? (all-children-checked?
+                                           (get-in note' root-note))
 
-                          node-checked? (all-children-checked?
-                                         (get-in note' root-note))
+                            note' (if node-checked?
+                                    (update-in note' root-note #(assoc % "checkbox" true))
+                                    note')]
 
-                          note' (if node-checked?
-                                  (update-in note' root-note #(assoc % "checkbox" true))
-                                  note')]
+                        ;;then, if the topmost item is checked we'll send it to checked-content
+                        (if (and newval (or (= 1 (count location))
+                                            node-checked?))
 
-                      ;;then, if the topmost item is checked we'll send it to checked-content
-                      (if (and newval (or (= 1 (count location))
-                                          node-checked?))
-
-                        (let [node (get-in note' [:sections section-id "content"
-                                                  (first location)])]
-                          (-> note'
-                              (update-in [:sections section-id "checked-content"]
-                                         #(conj % node))
-                              (update-in
-                               [:sections section-id "content"]
-                               #(model/vec-remove % (first location)))))
-                        note')))]))
+                          (let [node (get-in note' [:sections section-id "content"
+                                                    (first location)])]
+                            (-> note'
+                                (update-in [:sections section-id "checked-content"]
+                                           #(conj % node))
+                                (update-in
+                                 [:sections section-id "content"]
+                                 #(model/vec-remove % (first location)))))
+                          note'))
+                      ;;if no location found, don't update the note.
+                      note))]))
 
   (rd/dispatch [::model/save-list-widget?
                 {:section-id section-id}]))
