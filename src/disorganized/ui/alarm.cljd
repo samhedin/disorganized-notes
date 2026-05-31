@@ -81,7 +81,7 @@
                                          .title (section "name")
                                          .body (or description "Alarm!")
                                          .stopButton "Stop"))]
-    (await (set-alarm-notification date section note-id))
+    ;(await (set-alarm-notification date section note-id))
     (await (alarm/Alarm.set
             .alarmSettings settings))
     nil))
