@@ -141,6 +141,17 @@ Map<String, String> convertToStr(Map<dynamic, dynamic> m) {
   return m.map((key, value) => MapEntry(key.toString(), value.toString()));
 }
 
+Map<String, String> convertToStrMap(Map<dynamic, dynamic> m) {
+  //Like convertToStr, but builds a plain Dart map explicitly. ClojureDart's
+  //PersistentHashMap.map() returns another PersistentHashMap, which fails the
+  //Map<String, String> cast in go_router's pathParameters setter.
+  final result = <String, String>{};
+  m.forEach((key, value) {
+    result[key.toString()] = value.toString();
+  });
+  return result;
+}
+
 Map<String, dynamic> stringKeys(Map<dynamic, dynamic> m) {
   return m.map((key, value) {
     final stringKey = key.toString();

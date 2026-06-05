@@ -116,7 +116,9 @@
         files (mapv #(XFile %) values)]
     (println "sharing-intent-images " values files)
     (rd/dispatch [::model/upload-note [note true]])
-    (rd/dispatch [::model/set-current-note-id (:id note)])
+    (.pushNamed router "edit"
+                       .pathParameters (dutils/convertToStrMap {"id" (:id note)})
+                       .extra {:autofocus false})
     (await (media2/upload id "images" files))))
 
 (defn sharing-intent-other [values  scaffold-messenger]
@@ -128,7 +130,9 @@
         files (mapv #(XFile %) values)]
 
     (rd/dispatch [::model/upload-note [note true]])
-    (rd/dispatch [::model/set-current-note-id (:id note)])
+    (.pushNamed router "edit"
+                       .pathParameters (dutils/convertToStrMap {"id" (:id note)})
+                       .extra {:autofocus false})
     (await (media2/upload id "other" files))))
 
 (defn sharing-intent-text [text]
@@ -138,13 +142,20 @@
     (let [id (second (string/split text #"="))]
 
       (println "found note " id)
-      (rd/dispatch [::model/set-current-note-id id]))
+      (.pushNamed router "edit"
+                       .pathParameters (dutils/convertToStrMap {"id" id})
+                       .extra {:autofocus false}))
 
     (let [note (assoc (utils/init-new-note)
                       :plaintext (str text))]
 
       (rd/dispatch [::model/upload-note [note true]])
-      (rd/dispatch [::model/set-current-note-id (:id note)]))))
+      (Future/delayed
+         (Duration .milliseconds 500)
+         (fn []
+           (.pushNamed router "edit"
+                       .pathParameters (dutils/convertToStrMap {"id" (:id note)})
+                       .extra {:autofocus false}))))))
 
 (defn handle-shared [shared scaffold-messenger]
   (when (seq shared)
@@ -646,7 +657,7 @@
                           (reader/read-string (.-payload (.-first alarms)))]
 
                       (.pushNamed router "edit"
-                                  .pathParameters (dutils/convertToStr {"id" note-id})
+                                  .pathParameters (dutils/convertToStrMap {"id" note-id})
                                   .extra {:jumpto section-position
                                           :autofocus false})))))
 
