@@ -10,9 +10,7 @@ oneplus:
 	sudo adb start-server
 	sudo adb devices
 
-test:
-	just phone
-	maestro test ui-tests/save-note.yaml
+
 
 phone:
 	adb shell setprop debug.firebase.analytics.app com.disorganized.disorganized

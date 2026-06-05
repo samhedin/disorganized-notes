@@ -66,7 +66,7 @@
                              :section-position (section "section-position")})
 
                   .androidFullScreenIntent false
-                  .id (+ (.hashCode (section "id")) 54)
+                  .id (.hashCode (section "id"))
                   .loopAudio true
                   .vibrate true
                   .dateTime date
@@ -82,6 +82,7 @@
                                          .body (or description "Alarm!")
                                          .stopButton "Stop"))]
     ;(await (set-alarm-notification date section note-id))
+    
     (await (alarm/Alarm.set
             .alarmSettings settings))
     nil))
