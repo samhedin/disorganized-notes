@@ -1,5 +1,5 @@
 package com.disorganized.disorganized
-import HomeWidgetGlanceWidgetReceiver
+import es.antonborri.home_widget.HomeWidgetGlanceWidgetReceiver
 
 class NoteWidgetReceiver : HomeWidgetGlanceWidgetReceiver<NoteWidget>() {
     override val glanceAppWidget = NoteWidget()

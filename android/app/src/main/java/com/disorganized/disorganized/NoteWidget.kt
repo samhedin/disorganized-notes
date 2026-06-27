@@ -1,7 +1,7 @@
 package com.disorganized.disorganized
 
-import HomeWidgetGlanceState
-import HomeWidgetGlanceStateDefinition
+import es.antonborri.home_widget.HomeWidgetGlanceState
+import es.antonborri.home_widget.HomeWidgetGlanceStateDefinition
 import android.content.Context
 import android.net.Uri
 import android.util.Log
