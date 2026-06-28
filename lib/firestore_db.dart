@@ -137,7 +137,7 @@ class FirestoreDB {
  // server load arrives. On a first-ever launch the cache is empty and this
  // returns []. A server fetch (getAllNotes) should follow to refresh.
  Future<List<Map<String, dynamic>>> getCachedNotes(String userId,
-     {int limit = 6}) async {
+     {int limit = 10}) async {
    final sw = Stopwatch()..start();
    final col = FirebaseFirestore.instance.collection("notes2");
    final Map<String, Map<String, dynamic>> byId = {};

@@ -1252,9 +1252,7 @@
   []
   (let [uid (uid)
         db (fdb/FirestoreDB)
-        ;; Web shows more rows above the fold, so fetch a few more.
-        limit (if kIsWeb 9 6)
-        notes (when uid (await (.getCachedNotes db uid .limit limit)))]
+        notes (when uid (await (.getCachedNotes db uid)))]
     (notes->clj notes)))
 
 (defn move-notes-to-section-id-key [notes]
