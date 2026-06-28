@@ -129,31 +129,58 @@ class FirestoreDB {
    });
  }
 
- // Instant first-paint read: serve all notes straight from Firestore's local
- // on-disk cache (no network round trip). Returns whatever was synced last
- // session; on a first-ever launch the cache is empty and this returns []. A
- // server fetch (getAllNotes) should follow to refresh.
+ // Instant first-paint read: serve notes straight from Firestore's local
+ // on-disk cache (no network round trip). Returns all pinned notes plus the
+ // `limit` most-recently updated notes (deduped, so the total is at least
+ // `limit`). Pinned notes always render at the top of the list, so leaving
+ // them out of the first paint makes the list reflow (jank) when the full
+ // server load arrives. On a first-ever launch the cache is empty and this
+ // returns []. A server fetch (getAllNotes) should follow to refresh.
  Future<List<Map<String, dynamic>>> getCachedNotes(String userId,
-     {int limit = 10}) async {
-   try {
-     QuerySnapshot querySnapshot = await FirebaseFirestore.instance
-         .collection("notes2")
-         .where('user_access', arrayContains: userId)
-         .orderBy('updated_at', descending: true)
-         .limit(limit)
-         .get(const GetOptions(source: Source.cache));
+     {int limit = 6}) async {
+   final sw = Stopwatch()..start();
+   final col = FirebaseFirestore.instance.collection("notes2");
+   final Map<String, Map<String, dynamic>> byId = {};
 
-     List<Map<String, dynamic>> notes = querySnapshot.docs
-         .map((doc) => _processDoc(doc, userId))
-         .toList();
-     _sortNotes(notes);
-     return notes;
+   // Kick off both cache queries before awaiting so they run concurrently.
+   // Pinned: `pin > epoch` matches only real Timestamp pins. Recent: the
+   // most-recently-updated notes (pinned or not — dedup handles overlap).
+   // Cache queries run on the local engine, so no composite index is required.
+   final pinnedFuture = col
+       .where('user_access', arrayContains: userId)
+       .where('pin', isGreaterThan: Timestamp.fromMicrosecondsSinceEpoch(0))
+       .get(const GetOptions(source: Source.cache));
+   final recentFuture = col
+       .where('user_access', arrayContains: userId)
+       .orderBy('updated_at', descending: true)
+       .limit(limit)
+       .get(const GetOptions(source: Source.cache));
+
+   // Each awaited in its own try so a failure in one can't drop the other.
+   try {
+     final snap = await pinnedFuture;
+     for (final doc in snap.docs) {
+       byId[doc.id] = _processDoc(doc, userId);
+     }
    } catch (error) {
-     // A cache miss (e.g. nothing persisted yet) throws — treat as empty so
-     // the server phase still runs.
-     print("Disorganized: getCachedNotes miss/error: $error");
-     return [];
+     print("Disorganized: getCachedNotes pinned miss/error: $error");
    }
+   try {
+     final snap = await recentFuture;
+     for (final doc in snap.docs) {
+       byId[doc.id] = _processDoc(doc, userId);
+     }
+   } catch (error) {
+     // A cache miss (e.g. nothing persisted yet) throws — treated as empty so
+     // the server phase still runs.
+     print("Disorganized: getCachedNotes recent miss/error: $error");
+   }
+
+   final notes = byId.values.toList();
+   _sortNotes(notes);
+   print("Disorganized: getCachedNotes returned ${notes.length} notes "
+       "in ${sw.elapsedMilliseconds}ms");
+   return notes;
  }
 
  Future<List<Map<String, dynamic>>> getAllNotes(String userId) async {
