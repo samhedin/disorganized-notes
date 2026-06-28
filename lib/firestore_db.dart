@@ -59,76 +59,114 @@ class FirestoreDB {
     }
   }
 
+ // Normalize a single note document: fix up timestamps, pin values and
+ // derived fields. Shared by getAllNotes and getRecentNotes so both stay
+ // consistent.
+ Map<String, dynamic> _processDoc(QueryDocumentSnapshot doc, String userId) {
+   Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+   // Handle created_at timestamp
+   if (data['created_at'] is Timestamp) {
+     data['created_at'] = (data['created_at'] as Timestamp).toDate();
+   } else {
+     data['created_at'] = DateTime.now();
+   }
+   // Handle updated_at timestamp
+   if (data['updated_at'] is Timestamp) {
+     data['updated_at'] = (data['updated_at'] as Timestamp).toDate();
+   } else if (data['created_at'] is DateTime || data['created_at'] == null) {
+     // If updated_at doesn't exist or is invalid, set it to created_at
+     data['updated_at'] = data['created_at'];
+   }
+   // Ensure updated_at is not earlier than created_at
+   if (data['updated_at'] is DateTime &&
+       data['created_at'] is DateTime &&
+       (data['updated_at'] as DateTime)
+           .isBefore(data['created_at'] as DateTime)) {
+     data['updated_at'] = data['created_at'];
+   }
+   // Handle pin value conversion
+   if (data['pin'] != null) {
+     if (data['pin'] is bool && data['pin'] == true) {
+       // Convert boolean true to yesterday's timestamp
+       final yesterday = DateTime.now().subtract(const Duration(days: 1));
+       data['pin'] = Timestamp.fromDate(yesterday);
+     } else if (data['pin'] is Timestamp) {
+       // Keep existing timestamp
+       data['pin'] = data['pin'] as Timestamp;
+     } else {
+       // Remove invalid pin values
+       data.remove('pin');
+     }
+   }
+   Map<String, String?> userEmails =
+       Map<String, String?>.from(data['user_emails'] ?? {});
+   return {
+     ...data,
+     'id': doc.id,
+     'role': data['owner'] == userId ? 'owner' : 'shared',
+     'user_emails': userEmails,
+   };
+ }
+
+ // Sort: pinned notes first (oldest pin first), then by updated_at (newest
+ // first). Shared by getAllNotes and getRecentNotes.
+ void _sortNotes(List<Map<String, dynamic>> notes) {
+   notes.sort((a, b) {
+     var pinDateA =
+         a['pin'] is Timestamp ? (a['pin'] as Timestamp).toDate() : null;
+     var pinDateB =
+         b['pin'] is Timestamp ? (b['pin'] as Timestamp).toDate() : null;
+     // If both notes are pinned, sort by pin date in reverse (oldest first)
+     if (pinDateA != null && pinDateB != null) {
+       return pinDateA.compareTo(pinDateB);
+     }
+     // If only one note is pinned, it goes first
+     if (pinDateA != null) return -1;
+     if (pinDateB != null) return 1;
+     // If neither is pinned, sort by created_at (newest first)
+     return (b['updated_at'] as DateTime)
+         .compareTo(a['updated_at'] as DateTime);
+   });
+ }
+
+ // Instant first-paint read: serve all notes straight from Firestore's local
+ // on-disk cache (no network round trip). Returns whatever was synced last
+ // session; on a first-ever launch the cache is empty and this returns []. A
+ // server fetch (getAllNotes) should follow to refresh.
+ Future<List<Map<String, dynamic>>> getCachedNotes(String userId,
+     {int limit = 10}) async {
+   try {
+     QuerySnapshot querySnapshot = await FirebaseFirestore.instance
+         .collection("notes2")
+         .where('user_access', arrayContains: userId)
+         .orderBy('updated_at', descending: true)
+         .limit(limit)
+         .get(const GetOptions(source: Source.cache));
+
+     List<Map<String, dynamic>> notes = querySnapshot.docs
+         .map((doc) => _processDoc(doc, userId))
+         .toList();
+     _sortNotes(notes);
+     return notes;
+   } catch (error) {
+     // A cache miss (e.g. nothing persisted yet) throws — treat as empty so
+     // the server phase still runs.
+     print("Disorganized: getCachedNotes miss/error: $error");
+     return [];
+   }
+ }
+
  Future<List<Map<String, dynamic>>> getAllNotes(String userId) async {
   try {
     QuerySnapshot querySnapshot = await FirebaseFirestore.instance
         .collection("notes2")
         .where('user_access', arrayContains: userId)
         .get();
-        
-    List<Map<String, dynamic>> notes2 =
-        await Future.wait(querySnapshot.docs.map((doc) async {
-      Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-      // Handle created_at timestamp
-      if (data['created_at'] is Timestamp) {
-        data['created_at'] = (data['created_at'] as Timestamp).toDate();
-      } else {
-        data['created_at'] = DateTime.now();
-      }
-      // Handle updated_at timestamp
-      if (data['updated_at'] is Timestamp) {
-        data['updated_at'] = (data['updated_at'] as Timestamp).toDate();
-      } else if (data['created_at'] is DateTime || data['created_at'] == null) {
-        // If updated_at doesn't exist or is invalid, set it to created_at
-        data['updated_at'] = data['created_at'];
-      }
-      // Ensure updated_at is not earlier than created_at
-      if (data['updated_at'] is DateTime &&
-          data['created_at'] is DateTime &&
-          (data['updated_at'] as DateTime)
-              .isBefore(data['created_at'] as DateTime)) {
-        data['updated_at'] = data['created_at'];
-      }
-      // Handle pin value conversion
-      if (data['pin'] != null) {
-        if (data['pin'] is bool && data['pin'] == true) {
-          // Convert boolean true to yesterday's timestamp
-          final yesterday = DateTime.now().subtract(const Duration(days: 1));
-          data['pin'] = Timestamp.fromDate(yesterday);
-        } else if (data['pin'] is Timestamp) {
-          // Keep existing timestamp
-          data['pin'] = data['pin'] as Timestamp;
-        } else {
-          // Remove invalid pin values
-          data.remove('pin');
-        }
-      }
-      Map<String, String?> userEmails =
-          Map<String, String?>.from(data['user_emails'] ?? {});
-      List<String> userIds = List<String>.from(data['user_access'] ?? []);
-      return {
-        ...data,
-        'id': doc.id,
-        'role': data['owner'] == userId ? 'owner' : 'shared',
-        'user_emails': userEmails,
-      };
-    }));
-    notes2.sort((a, b) {
-      var pinDateA =
-          a['pin'] is Timestamp ? (a['pin'] as Timestamp).toDate() : null;
-      var pinDateB =
-          b['pin'] is Timestamp ? (b['pin'] as Timestamp).toDate() : null;
-      // If both notes are pinned, sort by pin date in reverse (oldest first)
-      if (pinDateA != null && pinDateB != null) {
-        return pinDateA.compareTo(pinDateB);
-      }
-      // If only one note is pinned, it goes first
-      if (pinDateA != null) return -1;
-      if (pinDateB != null) return 1;
-      // If neither is pinned, sort by created_at (newest first)
-      return (b['updated_at'] as DateTime)
-          .compareTo(a['updated_at'] as DateTime);
-    });
+
+    List<Map<String, dynamic>> notes2 = querySnapshot.docs
+        .map((doc) => _processDoc(doc, userId))
+        .toList();
+    _sortNotes(notes2);
     return notes2;
   } catch (error, stackTrace) {
     // Log to Crashlytics

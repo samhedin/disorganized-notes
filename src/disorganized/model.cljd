@@ -1228,21 +1228,32 @@
     (when user?
       (.-isAnonymous user?))))
 
-(defn select-all-notes []
+(defn notes->clj
+  "Convert raw Firestore note maps into clj data structures, dropping empties."
+  [notes]
+  (into []
+        (for [note notes
+              :let [n (into {} (for [[k v] note]
+                                 [(keyword k) (dart->clj-ds v)]))]
+              :when (or (not (string/blank? (:plaintext n)))
+                        (not (string/blank? (:title n)))
+                        (seq (:sections n))
+                        (seq (:tags n)))]
+          n)))
 
+(defn select-all-notes []
   (let [uid (uid)
         db (fdb/FirestoreDB)
         notes (when uid (await (.getAllNotes db uid)))]
+    (notes->clj notes)))
 
-    (into []
-          (for [note notes
-                :let [n (into {} (for [[k v] note]
-                                   [(keyword k) (dart->clj-ds v)]))]
-                :when (or (not (string/blank? (:plaintext n)))
-                          (not (string/blank? (:title n)))
-                          (seq (:sections n))
-                          (seq (:tags n)))]
-            n))))
+(defn select-cached-notes
+  "Instant first-paint fetch from Firestore's local cache (no network)."
+  []
+  (let [uid (uid)
+        db (fdb/FirestoreDB)
+        notes (when uid (await (.getCachedNotes db uid)))]
+    (notes->clj notes)))
 
 (defn move-notes-to-section-id-key [notes]
     ;;Already migrated (uuids are 36 long, old section-names max 30)
@@ -1796,10 +1807,32 @@
 
   (rd/reg-fx ::fetch-notes
              (fn [_]
-               (let [r (await (select-all-notes))
-                     r' (move-notes-to-section-id-key r)]
-                 (log-crashlytics (str "dispatching ::update-notes with " (count r') " notes "))
-                 (rd/dispatch [::update-notes r']))))
+               ;; Phase 1: instant first paint from the local cache so the user
+               ;; can access their notes immediately without a network round
+               ;; trip. Migration is intentionally skipped here — this is a
+               ;; throwaway preview and move-notes-to-section-id-key could
+               ;; misjudge "already migrated?" / trigger spurious writes. The
+               ;; full phase below runs the migration. On a first-ever launch
+               ;; the cache is empty and this dispatches [].
+               (let [cache-sw (Stopwatch.)]
+                 (.start cache-sw)
+                 (let [cached (await (select-cached-notes))]
+                   (rd/dispatch [::update-notes cached])
+                   (.stop cache-sw)
+                   (println (str "Disorganized: fetched and handled "
+                                 (count cached) " cached notes in "
+                                 (.-elapsedMilliseconds cache-sw) "ms"))))
+               ;; Phase 2: authoritative server fetch, replaces the cached set.
+               (let [all-sw (Stopwatch.)]
+                 (.start all-sw)
+                 (let [r (await (select-all-notes))
+                       r' (move-notes-to-section-id-key r)]
+                   (log-crashlytics (str "dispatching ::update-notes with " (count r') " notes "))
+                   (rd/dispatch [::update-notes r'])
+                   (.stop all-sw)
+                   (println (str "Disorganized: fetched and handled "
+                                 (count r') " notes (all) in "
+                                 (.-elapsedMilliseconds all-sw) "ms"))))))
 
   (rd/reg-event-db ::set-deleted-file (fn [db [_ id]]
                                         (assoc db :just-deleted id)))
