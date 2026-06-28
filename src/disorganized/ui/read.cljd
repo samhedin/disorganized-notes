@@ -776,16 +776,24 @@ Leave using the properties menu top right"))
                                     .child (m/Text "List"))
 
                                    (m/PopupMenuItem
-                                    .value "voice"
-                                    .child (m/Text "Voice"))
-
-                                   (m/PopupMenuItem
                                     .value "table2"
                                     .child (m/Text "Table"))
 
                                    (m/PopupMenuItem
+                                    .value "text"
+                                    .child (m/Text "Text"))
+
+                                   (m/PopupMenuItem
                                     .value "reminder"
                                     .child (m/Text "Reminder"))
+
+                                   (m/PopupMenuItem
+                                    .value "media2"
+                                    .child (m/Text "Media"))
+
+                                   (m/PopupMenuItem
+                                    .value "voice"
+                                    .child (m/Text "Voice"))
 
                                    (m/PopupMenuItem
                                     .value "timer"
@@ -800,8 +808,8 @@ Leave using the properties menu top right"))
                                     .child (m/Text "Location"))
 
                                    (m/PopupMenuItem
-                                    .value "media2"
-                                    .child (m/Text "Media"))])
+                                    .value "mindmap"
+                                    .child (m/Text "Mindmap"))])
                   .onSelected (fn [selection]
                                 (rd/dispatch [::model/set-key :filter-by-section (if (= selection "all")
                                                                                    nil
