@@ -32,7 +32,7 @@
    ["dart:io" :refer [Platform]]
    ["dart:convert" :as c]
    ["package:go_router/go_router.dart" :as go_router :refer [GoRouter GoRoute GoRouterState GoRouterHelper]]
-   ["package:flutter/foundation.dart" :refer [kIsWeb kProfileMode kDebugMode]]
+   ["package:flutter/foundation.dart" :refer [kIsWeb kProfileMode kDebugMode compute]]
    ["package:purchases_ui_flutter/purchases_ui_flutter.dart" :as rcu]
    ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
    [clojure.string :as string]
@@ -1245,7 +1245,12 @@
   (let [uid (uid)
         db (fdb/FirestoreDB)
         notes (when uid (await (.getAllNotes db uid)))]
-    (notes->clj notes)))
+    (if notes
+      ;; The dart->clj conversion is the CPU-heavy part of the fetch; run it
+      ;; on a background isolate so it doesn't jank startup. The Firestore
+      ;; query itself must stay on the main isolate (plugin channels).
+      (await (compute notes->clj notes))
+      [])))
 
 (defn select-cached-notes
   "Instant first-paint fetch from Firestore's local cache (no network)."
