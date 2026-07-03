@@ -508,11 +508,16 @@
 
       "outlined" (m/OutlinedButtonThemeData .style style))))
 
+;; any_link_preview 3.0.3's static getMetadata silently drops its :proxyUrl
+;; arg (it never forwards it to _getMetadata), so on web we prepend the CORS
+;; proxy to the link ourselves. The Cloud Run proxy expects ?url=<target>.
+;; Native (iOS/Android/desktop) has no CORS restriction, so fetch directly.
+(def cors-proxy "https://cors-989769042149.europe-west1.run.app/cors?url=")
+
 (defn url->preview [url]
   (await (AnyLinkPreview.getMetadata
-          .link url
+          .link (if kIsWeb (str cors-proxy url) url)
           .cache (Duration .days 7)
-          .proxyUrl "https://cors-989769042149.europe-west1.run.app/cors?"
           .userAgent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")))
 
 (defn find-urls [text]
