@@ -1549,17 +1549,22 @@
                                              (DateTime.now))))
            pinned-at (when-let [p (:pin note)]
                        (.toDate p))
+           i (index (:id note))
 
-           ;;If the note is pinned it should have a stable location
-           ;;if not it should just go to the top.
-           insertion-index (if (:pin note)
+           ;;If the note is pinned it should have a stable location.
+           ;;If it was edited this session it floats to the top.
+           ;;Otherwise (a plain open with no changes) it stays where it was.
+           insertion-index (cond
+                             (:pin note)
                              (count (take-while (fn [{:keys [pin]}]
 
                                                   (when pin
                                                     (.isBefore (.toDate pin)
                                                                pinned-at))) (:notes db)))
-                             0)
-           i (index (:id note))]
+                             (:current-note-edited? db) 0
+                             i i
+                             :else 0)
+           db (dissoc db :current-note-edited?)]
 
        (if i
          (update db :notes
@@ -1911,6 +1916,11 @@
                        (if (not= newnote (:current-note db))
                          {:db (-> db
                                   (assoc :current-note newnote')
+                                  ;; Mark the note as edited this session so that
+                                  ;; ::replace-current-note-in-notes floats it to
+                                  ;; the top of the list. A plain open (no edit)
+                                  ;; leaves this unset and keeps the note in place.
+                                  (assoc :current-note-edited? true)
                                   (update
                                    :undo #(conj (take 10 %) ;;Max undo steps
                                                 old-note)))
@@ -1998,7 +2008,9 @@
    (fn [db [_ id]]
 
      (if id
-       (assoc db :current-note-id id)
+       (-> db
+           (assoc :current-note-id id)
+           (dissoc :current-note-edited?))
        (let [base (-> db ;;In this case the user has just left the edit screen and we should clean up.
                       (assoc :current-note-id nil)
                       (dissoc :undo)
