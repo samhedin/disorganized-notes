@@ -109,6 +109,34 @@ To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :ow
                      {"children" [],
                       "id" (str (random-uuid)), "data" "Upload some memories with the Media section"}], "type" "list", "checked-content" []}})})
 
+(defn welcome
+  "Seeded as the user's very first note so they land on structure instead of a
+  blank page. Marked :default/:tutorial so it doesn't count toward the streak or
+  activation nudges (see consecutive-notes / the onboarding-banner note counts)."
+  []
+  (model/log-analytics "example_note" {"which" "welcome"})
+  {:id (str (random-uuid)),
+   :user_access [(uid)],
+   :updated_at (.subtract (DateTime.now)
+                          (Duration .minutes 4))
+   :default true
+   :tutorial true
+   :title "Welcome 👋"
+   :plaintext "Every note is built from sections — text, lists, tables, timers and more.
+
+Click at the bot left to add section, then add a tag so you can find this note later!"
+   :user_emails {(uid) ""},
+   :created_at (.subtract (DateTime.now)
+                          (Duration .minutes 5)),
+   :roles {(uid) "owner"},
+   :owner (uid)
+   :tags []
+   :sections (let [id (str (random-uuid))]
+               {id {"checkboxes-visible" true, "section-position" 0, "id" id, "name" "Try this", "content"
+                    [{"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Check off an item (tap the circle)"}
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Click bottom left to add a new section"}
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Add a tag to organize this note"}], "type" "list", "checked-content" []}})})
+
 (defn workout []
   (model/log-analytics "example_note" {"which" "workout"})
   {:id (str (random-uuid)),

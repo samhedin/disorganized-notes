@@ -91,23 +91,28 @@ then sign in with the same account.")
 
 (defn redirect-to-first-note [ctx]
   (println "redirecting")
-  (let [note (utils/init-new-note)]
+  ;;Seed a starter note (structure + a short checklist) instead of a blank page,
+  ;;so the first thing a new user sees demonstrates how notes work.
+  (let [note (ex/welcome)]
     (rd/dispatch [::model/upload-note  [note true]])
+    (rd/dispatch [::model/refresh-notes])
     (utils/log-analytics "note_created")
     (utils/log-analytics "first_note_created")
-    (rd/dispatch [::model/set-new-plaintext ""])
-    (rd/dispatch [::model/set-key :override-title ""])
-    (rd/dispatch [::model/set-key :focus-plaintext? true])
+    (rd/dispatch [::model/set-new-plaintext (:plaintext note)])
+    (rd/dispatch [::model/set-key :override-title (str (:title note))])
     (-> ctx
         go_router/GoRouterHelper
         (.go
          "/"))
 
+    ;;The seeded welcome note (checklist + structure) is now the onboarding, so
+    ;;we skip the old :first-launch? overlay coaching (tag hint, clone highlight)
+    ;;— it would just duplicate the checklist.
     (-> ctx go_router/GoRouterHelper
         (.pushNamed "edit"
                     .pathParameters {"id" (:id note)}
-                    .extra {:autofocus true
-                            :first-launch? true}))
+                    .extra {:autofocus false
+                            :first-launch? false}))
     nil))
 
 
