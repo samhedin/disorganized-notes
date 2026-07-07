@@ -96,8 +96,9 @@ then sign in with the same account.")
   (let [note (ex/welcome)]
     (rd/dispatch [::model/upload-note  [note true]])
     (rd/dispatch [::model/refresh-notes])
-    (utils/log-analytics "note_created")
-    (utils/log-analytics "first_note_created")
+    ;;The welcome note is seeded, not user-created — funnel counts the first
+    ;;*real* note elsewhere (see the note-count watcher in read/list-notes).
+    (utils/log-analytics "onboarding_welcome_seeded")
     (rd/dispatch [::model/set-new-plaintext (:plaintext note)])
     (rd/dispatch [::model/set-key :override-title (str (:title note))])
     (-> ctx

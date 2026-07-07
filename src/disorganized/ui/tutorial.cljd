@@ -238,6 +238,7 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
   (m/ElevatedButton.icon
    .onPressed (fn []
                 (model/snackbar scaffold-messenger "Setting premium...")
+                (model/log-analytics "premium_claim_attempt")
                 (await
                  (if (or kIsWeb Platform.isAndroid)
                    (let [output (await
@@ -251,16 +252,22 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                        (do
                          (await (model/restore-purchase))
                          (await (cancel-streak-reminders))
+                         (model/log-analytics "premium_claimed")
                          (model/snackbar scaffold-messenger "You have premium!"))
 
-                       (model/snackbar
-                        scaffold-messenger
-                        (case status
-                          "too-old" "Account older than 12 days, please contact support."
-                          "Something went wrong, please contact support and include your user id (found in settings)."))))
+                       (do
+                         ;;Note: analytics values can't contain "-", so map the status.
+                         (model/log-analytics "premium_claim_failed"
+                                              {"reason" (if (= "too-old" status) "too_old" "error")})
+                         (model/snackbar
+                          scaffold-messenger
+                          (case status
+                            "too-old" "Account older than 12 days, please contact support."
+                            "Something went wrong, please contact support and include your user id (found in settings).")))))
 
                    ;;Apple toc forbids us from adding premium in any other way than this.
                    (do
+                     (model/log-analytics "premium_redeem_opened")
                      (url/launch (str "https://apps.apple.com/redeem?ctx=offercodes&id=6738280174&code=THREEMONTHS"))
                      (await (model/restore-purchase))
                      (await (cancel-streak-reminders))
@@ -358,9 +365,13 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
           allowed? (await (.isNotificationAllowed (notif/AwesomeNotifications)))]
       (when (and (not primed?) (not allowed?))
         (await (.setBool prefs "reminder_primed" true))
-        (when (await (prime-notification-dialog ctx))
-          (await (model/request-notification-permission true))
-          (await (refresh-streak-reminders premium? saved-notes)))))))
+        (model/log-analytics "reminder_prompt_shown")
+        (if (await (prime-notification-dialog ctx))
+          (do
+            (model/log-analytics "reminder_prompt_accepted")
+            (await (model/request-notification-permission true))
+            (await (refresh-streak-reminders premium? saved-notes)))
+          (model/log-analytics "reminder_prompt_denied"))))))
 
 
 

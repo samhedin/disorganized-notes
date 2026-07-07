@@ -329,6 +329,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
                .constraints (m/BoxConstraints)
                .tooltip "Hide"
                .onPressed (fn []
+                            (utils/log-analytics "streak_banner_dismissed")
                             (rd/dispatch [::model/update-user-options {"hide_streak_banner" true}])
                             (rd/dispatch [::model/fetch-user-options])
                             nil))])
@@ -380,6 +381,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
                .constraints (m/BoxConstraints)
                .tooltip "Hide"
                .onPressed (fn []
+                            (utils/log-analytics "register_nudge_dismissed")
                             (rd/dispatch [::model/update-user-options {"hide_register_nudge" true}])
                             (rd/dispatch [::model/fetch-user-options])
                             nil))])
@@ -390,6 +392,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
              .icon (m/Icon m/Icons.cloud_upload)
              .label (m/Text "Register")
              .onPressed (fn []
+                          (utils/log-analytics "register_nudge_clicked")
                           (-> ctx go_router/GoRouterHelper
                               (.pushNamed "login"))
                           nil))])))))
@@ -1655,6 +1658,12 @@ Use cloning to copy over sections and tags to a new note."))])
                       prev @*prev-real-note-count]
                   (reset! *prev-real-note-count c)
                   (when (and prev (> c prev))
+                    ;;Activation funnel: first real note, then early milestones.
+                    (when (= c 1)
+                      (utils/log-analytics "first_note_created"))
+                    (when (<= 2 c 4)
+                      (utils/log-analytics "activation_note" {"count" c
+                                                              "streak" (tutorial/consecutive-notes sn)}))
                     (tutorial/refresh-streak-reminders premium? sn))))
 
    ;;Ask for notification permission (with a soft pre-prompt) once the user is on
