@@ -121,6 +121,7 @@ To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :ow
                           (Duration .minutes 4))
    :default true
    :tutorial true
+   :welcome true
    :title "Welcome 👋"
    :plaintext "Every note is built from sections — text, lists, tables, timers and more.
 

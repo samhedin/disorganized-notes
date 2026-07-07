@@ -226,9 +226,20 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
          dates)]
     (longest-consecutive good-distance-to-last-note)))
 
+(defn streak-progress
+  "Streak shown to the user: the real daily-note streak (consecutive-notes, which
+  excludes the :default welcome note) plus a day-1 credit for the seeded welcome
+  note. Gives new users an endowed-progress head start (\"1 of 4\") without letting
+  the seeded note distort the cadence math. Used for both the banner and the
+  claim gate so the two stay in sync."
+  [saved-notes]
+  (min streak-goal
+       (+ (consecutive-notes saved-notes)
+          (if (some :welcome saved-notes) 1 0))))
+
 (defn user-can-claim-premium? [saved-notes]
   (when (recent-user?)
-    (or (>= (consecutive-notes saved-notes) streak-goal)
+    (or (>= (streak-progress saved-notes) streak-goal)
         (some :imported saved-notes))))
 
 (defn cancel-streak-reminders []
@@ -359,7 +370,10 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
   (when (and (not kIsWeb)
              (recent-user?)
              (not premium?)
-             (>= (count (remove :default saved-notes)) 1))
+             (>= (count (remove :default saved-notes)) 1)
+             ;;This runs from a post-frame callback that can fire while the editor
+             ;;is pushed over the home screen — only prompt when home is on top.
+             (when-let [route (m/ModalRoute.of ctx)] (.-isCurrent route)))
     (let [prefs (await (sp/SharedPreferences.getInstance))
           primed? (await (.getBool prefs "reminder_primed"))
           allowed? (await (.isNotificationAllowed (notif/AwesomeNotifications)))]

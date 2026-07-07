@@ -264,7 +264,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
   (let [nothing (m/SliverToBoxAdapter .child (m/SizedBox.shrink))
         streak-dismissed? (boolean (prefs "hide_streak_banner"))
         register-dismissed? (boolean (prefs "hide_register_nudge"))
-        streak (tutorial/consecutive-notes saved-notes)]
+        streak (tutorial/streak-progress saved-notes)]
     (cond
       (nil? saved-notes)
       nothing
@@ -295,10 +295,10 @@ Please purchase premium through the iOS or Android app, then re-open this app an
             (m/SizedBox .height 12)
             (tutorial/premium-offer scaffold-messenger ctx)])))))
 
-      ;; 2. Building a streak — live progress card.
+      ;; 2. Building a streak — live progress card. Shown from streak 0 (as a
+      ;; goal/CTA) since the seeded welcome note is :default and doesn't count.
       (and (not premium?)
            (tutorial/recent-user?)
-           (>= streak 1)
            (not streak-dismissed?))
       (m/SliverToBoxAdapter
        .child
@@ -1657,7 +1657,10 @@ Use cloning to copy over sections and tags to a new note."))])
                 (let [c (count (remove :default sn))
                       prev @*prev-real-note-count]
                   (reset! *prev-real-note-count c)
-                  (when (and prev (> c prev))
+                  ;;Only a +1 change is a real creation. A bulk jump (0 -> N on
+                  ;;startup, or a Firestore cache->server load) must NOT be
+                  ;;mistaken for the user creating notes.
+                  (when (and prev (= c (inc prev)))
                     ;;Activation funnel: first real note, then early milestones.
                     (when (= c 1)
                       (utils/log-analytics "first_note_created"))

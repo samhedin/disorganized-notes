@@ -44,6 +44,14 @@
                  (m/Text text
                          .style (.-titleLarge tthm)))]))
 
+(defn feature-row [icon text tthm]
+  (m/Row
+   .mainAxisSize m/MainAxisSize.min
+   .children [(m/Icon icon .size 26)
+              (m/SizedBox .width 14)
+              (m/Text text
+                      .style (.-titleMedium tthm))]))
+
 (defn web-notice []
   (f/widget
    :get {{tthm .-textTheme} m/Theme}
@@ -146,33 +154,43 @@ then sign in with the same account.")
      (concat
       [(m/SizedBox .height 24)
        (m/Center
-        .child (m/Text "Tutorial"
+        .child (m/Text "Disorganized"
                        .style (.-headlineLarge tthm)))
 
        (f/widget
-        :padding {:top 20}
+        :padding {:top 8}
+        m/Center
+        (m/Text "One place for your lists, tables, reminders and more."
+                .textAlign m/TextAlign.center
+                .style (.-titleMedium tthm)))
+
+       (f/widget
+        :padding {:top 32}
         m/Center
         (m/Column
+         .mainAxisSize m/MainAxisSize.min
+         .crossAxisAlignment m/CrossAxisAlignment.start
          .children
-         [(m/SizedBox .height 12)
-          (checked-text "How to write notes")
-          (checked-text "How to organize notes")
-          (checked-text "How to reuse content")
+         [(feature-row m/Icons.post_add "Build notes from sections" tthm)
+          (m/SizedBox .height 16)
+          (feature-row m/Icons.tag "Find anything with tags" tthm)
+          (m/SizedBox .height 16)
+          (feature-row m/Icons.copy_all "Reuse notes as templates" tthm)
 
           (f/widget
-           :padding {:top 24}
+           :padding {:top 36}
+           m/Center
            (m/ElevatedButton
             .onPressed (fn []
-                         (do
-                             (await (FirebaseAuth.instance.signInAnonymously))
-                             (user-created nil)
-
-                             (redirect-to-first-note ctx)))
+                         (utils/log-analytics "welcome_get_started_clicked")
+                         (await (FirebaseAuth.instance.signInAnonymously))
+                         (user-created nil)
+                         (redirect-to-first-note ctx))
 
             .child (f/widget
-                    :padding {:horizontal 12
+                    :padding {:horizontal 20
                               :vertical 12}
-                    (m/Text "Continue"
+                    (m/Text "Get started"
                             .style (.-titleLarge tthm)))))]))
 
        (m/Spacer)
