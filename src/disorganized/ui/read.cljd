@@ -256,7 +256,7 @@ Please purchase premium through the iOS or Android app, then re-open this app an
                                    .extra {:autofocus true})))
                  nil))))
 
-(defn get-started [saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm]
+(defn get-started [saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? premium? ctx prefs tthm]
   (cond
     (nil? saved-notes)
     (m/SliverToBoxAdapter
@@ -270,6 +270,31 @@ Please purchase premium through the iOS or Android app, then re-open this app an
               .width 50
               .child (m/Center
                       .child (m/CircularProgressIndicator)))))
+
+    (and (not premium?)
+         (tutorial/user-can-claim-premium? saved-notes))
+    (m/SliverToBoxAdapter
+     .child
+     (f/widget
+      :padding {:horizontal 12
+                :vertical 16}
+      :get {{tthm .-textTheme} m/Theme}
+      (m/Card
+       .elevation 2
+       .child
+       (f/widget
+        :padding {:horizontal 12
+                  :vertical 12}
+        (m/Column
+         .mainAxisSize m/MainAxisSize.min
+         .crossAxisAlignment m/CrossAxisAlignment.start
+         .children
+         [(m/Text "You're on a roll!"
+                  .style (.-titleLarge tthm))
+          (m/SizedBox .height 8)
+          (m/Text "You've built a note-taking habit. Here's 3 months of premium on us.")
+          (m/SizedBox .height 12)
+          (tutorial/premium-offer scaffold-messenger ctx)])))))
 
     (and  (tutorial/user-younger-than? 3)
           (<= (count saved-notes) 4)
@@ -1616,10 +1641,10 @@ Use cloning to copy over sections and tags to a new note."))])
                              (nth not-pinned-notes index))
                            .childCount  (count not-pinned-notes)))
 
-                         (get-started saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm)])
+                         (get-started saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? premium? ctx prefs tthm)])
              :dispose nil
              :refresh-on
-             [notes prefs hide-vid-tutorial? expanded-searchbar? verified? selected-tags saved-notes all-tags brightness not-pinned]]
+             [notes prefs hide-vid-tutorial? expanded-searchbar? verified? premium? selected-tags saved-notes all-tags brightness not-pinned]]
 
    ;; (m/GridPaper
    ;;  .color m/Colors.red

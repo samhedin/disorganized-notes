@@ -176,12 +176,14 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                       (rd/dispatch [::model/set-current-note-id (:id note)])))))))
 
 (defn longest-consecutive [bools]
-  (reduce (fn [count v]
-            (if v
-              (inc count)
-              count))
-          0
-          bools))
+  (first
+   (reduce (fn [[longest current] v]
+             (if v
+               (let [current (inc current)]
+                 [(max longest current) current])
+               [longest 0]))
+           [0 0]
+           bools)))
 
 (defn user-younger-than?
   [days]
