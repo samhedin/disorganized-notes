@@ -269,9 +269,9 @@
 
            .cardTheme
            (m/CardThemeData
-            .color (hsl 0 0 0.05)
+            .color (hsl 0 0 0.09)
             .shape (m/RoundedRectangleBorder
-                    .side (m/BorderSide .color (hsl 0 0 0.2))
+                    .side (m/BorderSide .color (hsl 0 0 0.3))
                     .borderRadius border-radius)))
 
           "light" (m/ThemeData

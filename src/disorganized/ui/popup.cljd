@@ -1,5 +1,6 @@
 (ns disorganized.ui.popup
   (:require
+   ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions QuerySnapshot DocumentSnapshot GetOptions Source]]
    ["package:cloud_functions/cloud_functions.dart" :refer [FirebaseFunctions]]
    ["package:alarm/alarm.dart" :refer [Alarm]]
    ["package:disorganized_notes/timezone_initializer.dart" :as tzi]
@@ -33,6 +34,35 @@
    ["package:flutter_timezone/flutter_timezone.dart" :refer [FlutterTimezone]]
    ["package:timezone/timezone.dart" :as tz]
    ["package:flutter/services.dart" :as svc]))
+
+(defn force-sync-note!
+  "Force a one-shot server fetch of the open note (bypassing the local cache) and
+   push it into current-note. The live `.snapshots` listener already refreshes
+   automatically, but this lets a user who suspects a stale view pull the latest
+   immediately — Leland's requested manual sync button. Clears :note-syncing? in
+   `finally` so the spinner always resolves, even on error/offline."
+  [ctx id password navigator ]
+  
+  (when id
+    (try
+      (let [snap (await (.get (.doc (.collection FirebaseFirestore.instance "notes2") id)
+                              (GetOptions .source Source.server)))]
+        (when-let [raw (model/firestore-stream->map snap)]
+          
+          (let [note (into {} (for [[k v] raw] [(keyword k) v]))]
+            (when (:plaintext note)
+              (if (:encrypted note)
+                (when-let [note (await (model/decrypt-note-widget ctx note password navigator))]
+                  (rd/dispatch [::model/set-current-note-local note]))
+                (rd/dispatch [::model/set-current-note-local note]))))))
+      (catch Exception e
+        (println "force-sync-note! failed:" e))
+      (finally
+        ;;Small delay so user has time to see the sync icon appear.
+        (Future/delayed
+         (Duration .milliseconds 500)
+         (fn []
+           (rd/dispatch [::model/set-key :note-syncing? false])))))))
 
 (defn cancel []
   (f/widget
@@ -957,6 +987,11 @@ Never include personal details in notes that you share.")
                                                "Share"
                                                "Share (premium only)"))
                               .leading (m/Icon m/Icons.share)))
+                     (m/PopupMenuItem
+                      .value "force-sync"
+                      .child (m/ListTile
+                              .title (m/Text "Force sync note")
+                              .leading (m/Icon m/Icons.sync)))
 
                      (m/PopupMenuItem
                       .value "delete"
@@ -976,7 +1011,10 @@ Never include personal details in notes that you share.")
                                                           (dissoc m :pin)
                                                           (assoc m :pin (.now DateTime))))])
                             "undo" (rd/dispatch [::model/undo])
-
+                            "force-sync" (do
+                                           (rd/dispatch [::model/set-key :note-syncing? true])
+                                           (.showSnackBar scaffold-messenger (m/SnackBar .content (m/Text "Force syncing note...")))
+                                           (force-sync-note! ctx (:id note) password navigator))
                             "encrypt" (cond
                                         (:encrypted note) (model/snackbar scaffold-messenger  "This note is already encrypted.")
                                         (or premium? kDebugMode) (encrypt-note ctx password)

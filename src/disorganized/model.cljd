@@ -54,6 +54,41 @@
    ["package:fluttertoast/fluttertoast.dart" :as t]
    [cljd.flutter :as f]))
 
+(defn decrypt-note-widget [ctx note password navigator]
+  (if (nil? password)
+    (let [pw (await (m/showDialog
+                     .context ctx
+                     .builder
+                     (f/build
+                      :get [m/Navigator]
+                      :managed [tc (m/TextEditingController)]
+                      :get {{tthm .-textTheme} m/Theme}
+
+                      (m/AlertDialog
+                       .content
+                       (m/Column
+                        .mainAxisSize m/MainAxisSize.min
+                        .children
+                        [(m/Text "Insert password to decrypt note"
+                                 .style (.-titleLarge tthm))
+                         (m/TextField
+                          .obscureText true
+                          .controller tc)])
+
+                       .actions [(m/TextButton
+                                  .onPressed #(.pop navigator)
+                                  .child (m/Text "Cancel"))
+
+                                 (m/TextButton
+                                  .onPressed (fn []
+                                               (rd/dispatch
+                                                [::set-key :password (.-text tc)])
+                                               (.pop navigator (.-text tc)))
+                                  .child (m/Text "Ok"))]))))]
+      (if pw (await (decrypt-note note pw)) (.pop navigator)))
+
+    (await (decrypt-note note password))))
+
 
 (defn showtoast [msg]
   (t/Fluttertoast.showToast
@@ -1952,6 +1987,12 @@
   (rd/reg-sub ::start-recording?
               (fn [db _]
                 (:start-recording? db)))
+
+  (rd/reg-sub ::note-syncing?
+              ;; true while the editor is showing Firestore's cached copy and
+              ;; waiting for the server to confirm/refresh the open note.
+              (fn [db _]
+                (:note-syncing? db)))
 
   (rd/reg-event-db ::set-key
                    (fn [db [_ key value]]

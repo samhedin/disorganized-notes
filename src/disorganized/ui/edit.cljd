@@ -41,40 +41,9 @@
             ["package:awesome_notifications/awesome_notifications.dart" :as notif]
             [hti.re-dash.alpha :as rd]))
 
-(defn decrypt-note [ctx note password navigator]
-  (if (nil? password)
-    (let [pw (await (m/showDialog
-                     .context ctx
-                     .builder
-                     (f/build
-                      :get [m/Navigator]
-                      :managed [tc (m/TextEditingController)]
-                      :get {{tthm .-textTheme} m/Theme}
 
-                      (m/AlertDialog
-                       .content
-                       (m/Column
-                        .mainAxisSize m/MainAxisSize.min
-                        .children
-                        [(m/Text "Insert password to decrypt note"
-                                 .style (.-titleLarge tthm))
-                         (m/TextField
-                          .obscureText true
-                          .controller tc)])
 
-                       .actions [(m/TextButton
-                                  .onPressed #(.pop navigator)
-                                  .child (m/Text "Cancel"))
 
-                                 (m/TextButton
-                                  .onPressed (fn []
-                                               (rd/dispatch
-                                                [::model/set-key :password (.-text tc)])
-                                               (.pop navigator (.-text tc)))
-                                  .child (m/Text "Ok"))]))))]
-      (if pw (await (model/decrypt-note note pw)) (.pop navigator)))
-
-    (await (model/decrypt-note note password))))
 
 (def list-tile (m/ListTile
                 .title (m/Text "List")
@@ -1752,6 +1721,22 @@ Writing a recipe? Add a recipe tag.")))
 
     (table-of-content)
 
+    ;; Sync affordance: a spinner while we're still showing the cached copy and
+    ;; waiting on the server, otherwise a tap-to-sync button that forces a fresh
+    ;; server fetch. Gives users feedback that sync is happening and an escape
+    ;; hatch when it feels stuck, instead of closing/reopening the app.
+    (f/widget
+     :context ctx
+     :get [m/Navigator m/ScaffoldMessenger]
+     :watch [syncing? (rd/subscribe [::model/note-syncing?])]
+     (m/Visibility
+      .visible (boolean syncing?)
+      .child (m/Padding
+              .padding (m/EdgeInsets.all 14.0)
+              .child (m/SizedBox
+                      .width 18 .height 18
+                      .child (m/CircularProgressIndicator .strokeWidth 2)))))
+
     (m/Flexible
      .child
      (f/widget
@@ -1825,11 +1810,11 @@ Writing a recipe? Add a recipe tag.")))
                      (let [note (into {} (for [[k v]
                                                (model/firestore-stream->map snapshot)]
                                            [(keyword k) v]))]
-                       
+
                        (when (and (:plaintext note)
                                   (.-isCurrent modal-route))
                          (if (:encrypted note)
-                           (when-let [note (await (decrypt-note ctx note password navigator))]
+                           (when-let [note (await (model/decrypt-note-widget ctx note password navigator))]
                              (rd/dispatch [::model/set-current-note-local note]))
 
                            (rd/dispatch [::model/set-current-note-local note])))
