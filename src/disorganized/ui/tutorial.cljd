@@ -8,6 +8,7 @@
             ["dart:io" :refer [Platform]]
             ["package:awesome_notifications/awesome_notifications.dart" :as notif :refer [AwesomeNotifications ReceivedAction]]
             ["package:cloud_functions/cloud_functions.dart" :refer [FirebaseFunctions]]
+            ["package:shared_preferences/shared_preferences.dart" :as sp]
             ["package:disorganized_notes/utils.dart" :as dutils]
             ["package:firebase_auth/firebase_auth.dart" :as firebase-auth :refer [FirebaseAuth]]
             [cljd.flutter :as f]
@@ -230,6 +231,9 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
     (or (>= (consecutive-notes saved-notes) streak-goal)
         (some :imported saved-notes))))
 
+(defn cancel-streak-reminders []
+  (await (.cancelSchedulesByChannelKey (notif/AwesomeNotifications) "habit_channel")))
+
 (defn premium-offer [scaffold-messenger ctx]
   (m/ElevatedButton.icon
    .onPressed (fn []
@@ -246,6 +250,7 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                      (if (= "success" status)
                        (do
                          (await (model/restore-purchase))
+                         (await (cancel-streak-reminders))
                          (model/snackbar scaffold-messenger "You have premium!"))
 
                        (model/snackbar
@@ -258,6 +263,7 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                    (do
                      (url/launch (str "https://apps.apple.com/redeem?ctx=offercodes&id=6738280174&code=THREEMONTHS"))
                      (await (model/restore-purchase))
+                     (await (cancel-streak-reminders))
                      (model/snackbar scaffold-messenger "Open settings and click Sync premium access after signing up"))))
 
                 nil)
@@ -267,45 +273,94 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
 ;;Daily nudges that build toward the premium streak reward (see
 ;;user-can-claim-premium? and the home-screen progress banner). We schedule one
 ;;per day for the streak window so returning each day keeps the streak alive.
-;;Copy is deliberately non-specific about "day N" because these are scheduled
-;;once up front and can't know the user's real-time progress.
-(def streak-reminders
-  [{:id 0
-    :hours 24
-    :title "Keep your streak going"
-    :body (str "Add a note today. " streak-goal " days in a row unlocks 3 months of premium.")}
-   {:id 1
-    :hours 48
-    :title "Don't lose your streak"
-    :body "A quick note today keeps you on track for 3 months of premium."}
-   {:id 2
-    :hours 72
-    :title "Almost there"
-    :body (str "You're closing in on " streak-goal " days. Make a note to claim your premium.")}])
+;;Copy reflects the streak at scheduling time; since we reschedule every time a
+;;new note is created (refresh-streak-reminders), it stays roughly in sync.
+(defn streak-reminders [streak]
+  (let [remaining (max 1 (- streak-goal streak))
+        days (fn [n] (str n (if (= 1 n) " day" " days")))]
+    [{:id 0
+      :hours 24
+      :title "Keep your streak going"
+      :body (str "You're " streak " of " streak-goal " days in. Add a note today to earn 3 months of premium.")}
+     {:id 1
+      :hours 48
+      :title "Don't lose your streak"
+      :body (str "Just " (days remaining) " of notes to go for 3 months of premium.")}
+     {:id 2
+      :hours 72
+      :title "Almost there"
+      :body (str "You're closing in on " streak-goal " days. Make a note to claim your premium.")}]))
 
-(defn schedule-habit-reminders []
-  (await (model/request-notification-permission))
+;;Cancels any outstanding reminders and reschedules them from the current streak,
+;;unless the reward is already earned/unlocked (cancel-on-claim) or notifications
+;;aren't permitted. Safe to call on every note creation. Requires no BuildContext
+;;so it can run from a background watcher; permission is solicited separately by
+;;maybe-prime-reminders.
+(defn refresh-streak-reminders [premium? saved-notes]
+  (when (and (not kIsWeb) (recent-user?))
+    (await (cancel-streak-reminders))
+    (when (and (not premium?)
+               (not (user-can-claim-premium? saved-notes))
+               (await (.isNotificationAllowed (notif/AwesomeNotifications))))
+      ;;These have to have different ids, otherwise the last one rewrites the others.
+      (doseq [{:keys [id hours title body]} (streak-reminders (consecutive-notes saved-notes))]
+        (await
+         (.createNotification
+          (notif/AwesomeNotifications)
 
-  ;;These have to have different ids, otherwise the last one rewrites the others.
-  (doseq [{:keys [id hours title body]} streak-reminders]
-    (await
-     (.createNotification
-      (notif/AwesomeNotifications)
+          .content
+          (notif/NotificationContent
+           .id id
+           .channelKey "habit_channel"
+           .title title
+           .body body
+           .wakeUpScreen false
+           .category notif/NotificationCategory.Recommendation)
 
-      .content
-      (notif/NotificationContent
-       .id id
-       .channelKey "habit_channel"
-       .title title
-       .body body
-       .wakeUpScreen false
-       .category notif/NotificationCategory.Recommendation)
+          .schedule
+          (notif/NotificationCalendar.fromDate
+           .date (.add (DateTime.now) (Duration .hours hours))
+           .allowWhileIdle false
+           .preciseAlarm false)))))))
 
-      .schedule
-      (notif/NotificationCalendar.fromDate
-       .date (.add (DateTime.now) (Duration .hours hours))
-       .allowWhileIdle false
-       .preciseAlarm false)))))
+;;Soft pre-prompt shown before the OS permission dialog so we ask in context
+;;(right after the user has a note and can see the reward), not cold.
+(defn prime-notification-dialog [ctx]
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    :get {{tthm .-textTheme} m/Theme}
+    (m/AlertDialog
+     .title (m/Text "Stay on track")
+     .content (m/Text (str "Want reminders to help you build a note-taking habit? Keep it going for "
+                           streak-goal " days and earn 3 months of premium."))
+     .actions
+     [(m/TextButton
+       .child (m/Text "Not now")
+       .onPressed (fn [] (.pop navigator false) nil))
+      (m/ElevatedButton
+       .child (m/Text "Enable reminders")
+       .onPressed (fn [] (.pop navigator true) nil))]))))
+
+;;Shows the pre-prompt once (per device), then requests permission and schedules
+;;the first batch of reminders. No-ops if already primed, already allowed, or the
+;;user isn't in the reward window. Call from a spot where the home screen is
+;;actually visible (a post-frame callback), never mid-navigation.
+(defn maybe-prime-reminders [ctx premium? saved-notes]
+  (when (and (not kIsWeb)
+             (recent-user?)
+             (not premium?)
+             (>= (count (remove :default saved-notes)) 1))
+    (let [prefs (await (sp/SharedPreferences.getInstance))
+          primed? (await (.getBool prefs "reminder_primed"))
+          allowed? (await (.isNotificationAllowed (notif/AwesomeNotifications)))]
+      (when (and (not primed?) (not allowed?))
+        (await (.setBool prefs "reminder_primed" true))
+        (when (await (prime-notification-dialog ctx))
+          (await (model/request-notification-permission true))
+          (await (refresh-streak-reminders premium? saved-notes)))))))
 
 
 

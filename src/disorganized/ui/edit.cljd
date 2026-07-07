@@ -1781,8 +1781,6 @@ Writing a recipe? Add a recipe tag.")))
     .onPopInvokedWithResult
     (fn [_ _]
       (when first-launch?
-        (await (tutorial/schedule-habit-reminders))
-
         (when (= "true" (model/remote-conf "onboarding_show_note_selector"))
           (-> ctx go_router/GoRouterHelper
               (.goNamed "note-selector"))))
