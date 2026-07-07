@@ -1,1 +1,18 @@
-{}
+{
+  "projects": {
+    "default": "disorganized-537c1"
+  },
+  "targets": {
+    "disorganized-537c1": {
+      "hosting": {
+        "app": [
+          "disorganized-537c1"
+        ],
+        "www": [
+          "getdisorganized"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

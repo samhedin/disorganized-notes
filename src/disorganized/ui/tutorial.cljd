@@ -204,6 +204,11 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
   (when-let [user? (-> FirebaseAuth .-instance .-currentUser)]
     (.inDays (.difference  (DateTime.now) (-> user? .-metadata .-creationTime)))))
 
+;;Number of daily-cadence notes in a row needed to unlock the premium reward.
+;;Shared by the gate (user-can-claim-premium?) and the home-screen progress
+;;banner so the two never drift apart.
+(def streak-goal 4)
+
 (defn consecutive-notes [saved-notes]
   (let [dates (sort (mapv :created_at (filter #(nil? (:default %))
                                               saved-notes)))
@@ -222,7 +227,7 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
 
 (defn user-can-claim-premium? [saved-notes]
   (when (recent-user?)
-    (or (>= (consecutive-notes saved-notes) 4)
+    (or (>= (consecutive-notes saved-notes) streak-goal)
         (some :imported saved-notes))))
 
 (defn premium-offer [scaffold-messenger ctx]
@@ -259,66 +264,46 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
    .icon (m/Icon m/Icons.workspace_premium)
    .label (m/Text "Click here for 3 months premium!")))
 
+;;Daily nudges that build toward the premium streak reward (see
+;;user-can-claim-premium? and the home-screen progress banner). We schedule one
+;;per day for the streak window so returning each day keeps the streak alive.
+;;Copy is deliberately non-specific about "day N" because these are scheduled
+;;once up front and can't know the user's real-time progress.
+(def streak-reminders
+  [{:id 0
+    :hours 24
+    :title "Keep your streak going"
+    :body (str "Add a note today. " streak-goal " days in a row unlocks 3 months of premium.")}
+   {:id 1
+    :hours 48
+    :title "Don't lose your streak"
+    :body "A quick note today keeps you on track for 3 months of premium."}
+   {:id 2
+    :hours 72
+    :title "Almost there"
+    :body (str "You're closing in on " streak-goal " days. Make a note to claim your premium.")}])
+
 (defn schedule-habit-reminders []
   (await (model/request-notification-permission))
-  (let [tz (await (.getLocalTimeZoneIdentifier
-                   (notif/AwesomeNotifications)))]
 
-     ;;These have to have different ids, otherwise the last one rewrites the others.
+  ;;These have to have different ids, otherwise the last one rewrites the others.
+  (doseq [{:keys [id hours title body]} streak-reminders]
     (await
      (.createNotification
       (notif/AwesomeNotifications)
 
       .content
       (notif/NotificationContent
-       .id 0
+       .id id
        .channelKey "habit_channel"
-       .title "Make a shopping list!"
-       .body "Try the list section!"
+       .title title
+       .body body
        .wakeUpScreen false
        .category notif/NotificationCategory.Recommendation)
 
       .schedule
       (notif/NotificationCalendar.fromDate
-       .date (.add (DateTime.now) (Duration .hours 24))
-       .allowWhileIdle false
-       .preciseAlarm false)))
-
-    (await
-     (.createNotification
-      (notif/AwesomeNotifications)
-
-      .content
-      (notif/NotificationContent
-       .id 2
-       .channelKey "habit_channel"
-       .title "Try a new section!"
-       .body "Many sections to check out, try a new one!"
-       .category notif/NotificationCategory.Recommendation)
-
-      .schedule
-      (notif/NotificationCalendar.fromDate
-       .date (.add (DateTime.now) (Duration .hours 96))
-       .allowWhileIdle false
-       .preciseAlarm false)))
-
-    (await
-     (.createNotification
-      (notif/AwesomeNotifications)
-
-      .content
-      (notif/NotificationContent
-       .id 3
-       .channelKey "habit_channel"
-       .title "Try the tables"
-       .body "Tables are great! Check them out."
-       .category notif/NotificationCategory.Recommendation)
-
-      .schedule
-      (notif/NotificationCalendar.fromDate
-       .date (.add (DateTime.now)
-                   (Duration .hours 168))
-       
+       .date (.add (DateTime.now) (Duration .hours hours))
        .allowWhileIdle false
        .preciseAlarm false)))))
 

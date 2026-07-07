@@ -256,7 +256,94 @@ Please purchase premium through the iOS or Android app, then re-open this app an
                                    .extra {:autofocus true})))
                  nil))))
 
-(defn get-started [saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? premium? ctx prefs tthm]
+(defn premium-streak
+  "Top-of-list banner that makes the premium reward and the user's progress
+  toward it visible. Shows the claim card once earned, otherwise live streak
+  progress; renders nothing outside the onboarding window or for premium users."
+  [saved-notes premium? dismissed? scaffold-messenger ctx]
+  (let [nothing (m/SliverToBoxAdapter .child (m/SizedBox.shrink))]
+    (cond
+      (or premium?
+          (nil? saved-notes)
+          (not (tutorial/recent-user?)))
+      nothing
+
+      (tutorial/user-can-claim-premium? saved-notes)
+      (m/SliverToBoxAdapter
+       .child
+       (f/widget
+        :padding {:horizontal 8
+                  :top 8}
+        :get {{tthm .-textTheme} m/Theme}
+        (m/Card
+         .elevation 2
+         .child
+         (f/widget
+          :padding {:horizontal 12
+                    :vertical 12}
+          (m/Column
+           .mainAxisSize m/MainAxisSize.min
+           .crossAxisAlignment m/CrossAxisAlignment.start
+           .children
+           [(m/Text "You're on a roll!"
+                    .style (.-titleLarge tthm))
+            (m/SizedBox .height 8)
+            (m/Text "You've built a note-taking habit. Here's 3 months of premium on us.")
+            (m/SizedBox .height 12)
+            (tutorial/premium-offer scaffold-messenger ctx)])))))
+
+      :else
+      (let [streak (tutorial/consecutive-notes saved-notes)]
+        (if (or dismissed? (< streak 1))
+          nothing
+          (m/SliverToBoxAdapter
+           .child
+           (f/widget
+            :padding {:horizontal 8
+                      :top 8}
+            :get {{tthm .-textTheme} m/Theme}
+            (m/Card
+             .elevation 2
+             .child
+             (f/widget
+              :padding {:horizontal 12
+                        :vertical 12}
+              (m/Column
+               .mainAxisSize m/MainAxisSize.min
+               .crossAxisAlignment m/CrossAxisAlignment.start
+               .children
+               [(m/Row
+                 .crossAxisAlignment m/CrossAxisAlignment.start
+                 .children
+                 [(m/Expanded
+                   .child (m/Text "Build a streak, earn premium"
+                                  .style (.-titleMedium tthm)))
+                  (m/IconButton
+                   .icon (m/Icon m/Icons.close .size 18)
+                   .visualDensity m/VisualDensity.compact
+                   .padding m/EdgeInsets.zero
+                   .constraints (m/BoxConstraints)
+                   .tooltip "Hide"
+                   .onPressed (fn []
+                                (rd/dispatch [::model/update-user-options {"hide_streak_banner" true}])
+                                (rd/dispatch [::model/fetch-user-options])
+                                nil))])
+                (m/SizedBox .height 6)
+                (m/Text (str "Make a note " tutorial/streak-goal " days in a row to earn 3 months of premium!"))
+                (m/SizedBox .height 12)
+                (m/Row
+                 .spacing 8
+                 .children
+                 (vec (for [i (range tutorial/streak-goal)]
+                        (m/Icon (if (< i streak)
+                                  m/Icons.check_circle
+                                  m/Icons.radio_button_unchecked)
+                                .color (when (< i streak) m/Colors.green)))))
+                (m/SizedBox .height 6)
+                (m/Text (str streak " of " tutorial/streak-goal " days")
+                        .style (.-bodySmall tthm))]))))))))))
+
+(defn get-started [saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm]
   (cond
     (nil? saved-notes)
     (m/SliverToBoxAdapter
@@ -270,31 +357,6 @@ Please purchase premium through the iOS or Android app, then re-open this app an
               .width 50
               .child (m/Center
                       .child (m/CircularProgressIndicator)))))
-
-    (and (not premium?)
-         (tutorial/user-can-claim-premium? saved-notes))
-    (m/SliverToBoxAdapter
-     .child
-     (f/widget
-      :padding {:horizontal 12
-                :vertical 16}
-      :get {{tthm .-textTheme} m/Theme}
-      (m/Card
-       .elevation 2
-       .child
-       (f/widget
-        :padding {:horizontal 12
-                  :vertical 12}
-        (m/Column
-         .mainAxisSize m/MainAxisSize.min
-         .crossAxisAlignment m/CrossAxisAlignment.start
-         .children
-         [(m/Text "You're on a roll!"
-                  .style (.-titleLarge tthm))
-          (m/SizedBox .height 8)
-          (m/Text "You've built a note-taking habit. Here's 3 months of premium on us.")
-          (m/SizedBox .height 12)
-          (tutorial/premium-offer scaffold-messenger ctx)])))))
 
     (and  (tutorial/user-younger-than? 3)
           (<= (count saved-notes) 4)
@@ -1616,6 +1678,7 @@ Use cloning to copy over sections and tags to a new note."))])
 
                          (tag-chips selected-tags *selected-tags)
                          (scheduled-alarms)
+                         (premium-streak saved-notes premium? (boolean (prefs "hide_streak_banner")) scaffold-messenger ctx)
                          (m/SliverVisibility
                           ;;pinned-notes contain 2 items by default, the "pinned" icon and the
                           ;;"unpinned" icon. So if count >= 3 then there is at least one pinned
@@ -1641,7 +1704,7 @@ Use cloning to copy over sections and tags to a new note."))])
                              (nth not-pinned-notes index))
                            .childCount  (count not-pinned-notes)))
 
-                         (get-started saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? premium? ctx prefs tthm)])
+                         (get-started saved-notes not-pinned hide-vid-tutorial? *svt? scaffold-messenger verified? ctx prefs tthm)])
              :dispose nil
              :refresh-on
              [notes prefs hide-vid-tutorial? expanded-searchbar? verified? premium? selected-tags saved-notes all-tags brightness not-pinned]]

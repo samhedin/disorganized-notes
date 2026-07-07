@@ -44,7 +44,7 @@ release:
 web-deploy:
 	clj -M:cljd compile
 	flutter build web --release
-	firebase deploy --only hosting
+	firebase deploy --only hosting:app
 
 web:
 	clj -M:cljd flutter -d chrome --web-port 7357 --web-hostname localhost
