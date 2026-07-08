@@ -214,14 +214,17 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
   (let [dates (sort (mapv :created_at (filter #(nil? (:default %))
                                               saved-notes)))
         ;;The user shouldn't be able to just spam 5 notes straight away.
-        ;;There needs to be some habit to it.
+        ;;There needs to be some habit to it. Deliberately liberal on the other
+        ;;end: missing a day is fine, the streak only breaks after 72h without
+        ;;a note. Keep the reminder schedule (streak-reminders) anchored to
+        ;;this deadline.
         good-distance-to-last-note
         (map-indexed
          (fn [i date]
            (if (= 0 i)
              true
              (let [last-date (nth dates (dec i))]
-               (and (.isBefore date (.add last-date (Duration .hours 48)))
+               (and (.isBefore date (.add last-date (Duration .hours 72)))
                     (.isAfter date (.add last-date (Duration .hours 7)))))))
          dates)]
     (longest-consecutive good-distance-to-last-note)))
@@ -245,6 +248,35 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
 (defn cancel-streak-reminders []
   (await (.cancelSchedulesByChannelKey (notif/AwesomeNotifications) "habit_channel")))
 
+;;Shown right after an anonymous user claims the premium reward — the moment
+;;they have the most to lose from staying unregistered. Routes to /login, which
+;;links the anonymous account (CredentialLinked) and keeps notes + premium.
+(defn register-to-keep-premium-dialog [ctx]
+  (model/log-analytics "claim_register_prompt_shown")
+  (m/showDialog
+   .context ctx
+   .builder
+   (f/build
+    :get [m/Navigator]
+    (m/AlertDialog
+     .title (m/Text "Keep your premium")
+     .content (m/Text "Your premium and notes only exist on this device. Add an email so you don't lose them if you switch or reset your phone.")
+     .actions
+     [(m/TextButton
+       .child (m/Text "Not now")
+       .onPressed (fn []
+                    (model/log-analytics "claim_register_prompt_dismissed")
+                    (.pop navigator)
+                    nil))
+      (m/ElevatedButton
+       .child (m/Text "Register")
+       .onPressed (fn []
+                    (model/log-analytics "claim_register_prompt_accepted")
+                    (.pop navigator)
+                    (-> ctx go_router/GoRouterHelper
+                        (.pushNamed "login"))
+                    nil))]))))
+
 (defn premium-offer [scaffold-messenger ctx]
   (m/ElevatedButton.icon
    .onPressed (fn []
@@ -264,7 +296,9 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                          (await (model/restore-purchase))
                          (await (cancel-streak-reminders))
                          (model/log-analytics "premium_claimed")
-                         (model/snackbar scaffold-messenger "You have premium!"))
+                         (model/snackbar scaffold-messenger "You have premium!")
+                         (when (model/user-is-anonymous)
+                           (await (register-to-keep-premium-dialog ctx))))
 
                        (do
                          ;;Note: analytics values can't contain "-", so map the status.
@@ -288,9 +322,11 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
    .icon (m/Icon m/Icons.workspace_premium)
    .label (m/Text "Click here for 3 months premium!")))
 
-;;Daily nudges that build toward the premium streak reward (see
-;;user-can-claim-premium? and the home-screen progress banner). We schedule one
-;;per day for the streak window so returning each day keeps the streak alive.
+;;Nudges that build toward the premium streak reward (see
+;;user-can-claim-premium? and the home-screen progress banner). The streak
+;;breaks 72h after the last note (consecutive-notes), so the schedule is
+;;24h (routine nudge) / 66h (last call, still 6h to act) / 96h (streak already
+;;broken — sell a fresh start, not urgency).
 ;;Copy reflects the streak at scheduling time; since we reschedule every time a
 ;;new note is created (refresh-streak-reminders), it stays roughly in sync.
 (defn streak-reminders [streak]
@@ -301,13 +337,13 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
       :title "Keep your streak going"
       :body (str "You're " streak " of " streak-goal " days in. Add a note today to earn 3 months of premium.")}
      {:id 1
-      :hours 48
-      :title "Don't lose your streak"
-      :body (str "Just " (days remaining) " of notes to go for 3 months of premium.")}
+      :hours 66
+      :title "Your streak expires soon"
+      :body (str "Your streak ends in a few hours. Add a quick note — just " (days remaining) " to go for 3 months of premium.")}
      {:id 2
-      :hours 72
-      :title "Almost there"
-      :body (str "You're closing in on " streak-goal " days. Make a note to claim your premium.")}]))
+      :hours 96
+      :title "Start a fresh streak"
+      :body (str "Make a note " streak-goal " days in a row and 3 months of premium is yours.")}]))
 
 ;;Cancels any outstanding reminders and reschedules them from the current streak,
 ;;unless the reward is already earned/unlocked (cancel-on-claim) or notifications
@@ -321,7 +357,9 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
                (not (user-can-claim-premium? saved-notes))
                (await (.isNotificationAllowed (notif/AwesomeNotifications))))
       ;;These have to have different ids, otherwise the last one rewrites the others.
-      (doseq [{:keys [id hours title body]} (streak-reminders (consecutive-notes saved-notes))]
+      ;;streak-progress (not consecutive-notes) so the copy matches the banner,
+      ;;which credits the seeded welcome note as day 1.
+      (doseq [{:keys [id hours title body]} (streak-reminders (streak-progress saved-notes))]
         (await
          (.createNotification
           (notif/AwesomeNotifications)

@@ -125,7 +125,7 @@ To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :ow
    :title "Welcome 👋"
    :plaintext "Every note is built from sections — text, lists, tables, timers and more.
 
-Click at the bot left to add section, then add a tag so you can find this note later!"
+Click at the bottom left to add a section, then add a tag so you can find this note later!"
    :user_emails {(uid) ""},
    :created_at (.subtract (DateTime.now)
                           (Duration .minutes 5)),
