@@ -30,7 +30,7 @@
    [disorganized.messaging :as messaging]
    ["package:cloud_firestore/cloud_firestore.dart" :refer [FirebaseFirestore SetOptions Settings FieldPath]]
    ["package:firebase_crashlytics/firebase_crashlytics.dart" :refer [FirebaseCrashlytics]]
-   ["dart:ui" :refer [Locale]]
+   ["dart:ui" :refer [Locale PlatformDispatcher]]
    ["package:disorganized_notes/firebase_options.dart" :as options]
    ["package:flutter_app_badge_control/flutter_app_badge_control.dart" :refer [FlutterAppBadgeControl]]
    [disorganized.ui.verify-email :refer [verify-email]]
@@ -639,7 +639,14 @@
   (.enable FlutterCryptography)
   (when (and (not kDebugMode) (not kIsWeb))
     (set! (.-onError FlutterError)
-          (.-recordFlutterFatalError FirebaseCrashlytics.instance)))
+          (.-recordFlutterFatalError FirebaseCrashlytics.instance))
+    ;;FlutterError.onError only catches framework errors. Uncaught async errors
+    ;;otherwise crash without reaching Crashlytics (seen as GA4 app_exception
+    ;;with no Crashlytics report, July 2026 cohort).
+    (set! (.-onError PlatformDispatcher.instance)
+          (fn [error stack]
+            (FirebaseCrashlytics.instance.recordError error stack .fatal true)
+            true)))
 
   (f/run
    :get [m/MediaQuery m/Theme]

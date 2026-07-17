@@ -66,6 +66,7 @@ To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :ow
    :user_access [(uid)],
    :updated_at (.subtract (DateTime.now)
                      (Duration .minutes 4))
+   :default true
    :tutorial true
    :title "Shopping list",
    :clone-tutorial true
@@ -87,6 +88,7 @@ To reuse these in future recipes, clone this note.", :roles {(uid) "owner"}, :ow
    :user_access [(uid)],
    :updated_at (.subtract (DateTime.now)
                      (Duration .minutes 4))
+   :default true
    :tutorial true
    :title "Todo",
    :plaintext "A few things to try in the app!"
@@ -136,7 +138,11 @@ Click at the bottom left to add a section, then add a tag so you can find this n
                {id {"checkboxes-visible" true, "section-position" 0, "id" id, "name" "Try this", "content"
                     [{"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Check off an item (tap the circle)"}
                      {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Click bottom left to add a new section"}
-                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Add a tag to organize this note"}], "type" "list", "checked-content" []}})})
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Add a tag to organize this note"}
+                     ;;The bridge out of the tutorial: July 2026 cohort users
+                     ;;finished this checklist and uninstalled — nothing pointed
+                     ;;them at making their own note.
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Now make your own note — go back and tap the + button!"}], "type" "list", "checked-content" []}})})
 
 (defn workout []
   (model/log-analytics "example_note" {"which" "workout"})
@@ -144,6 +150,7 @@ Click at the bottom left to add a section, then add a tag so you can find this n
    :user_access [(uid)],
    :updated_at (.subtract (DateTime.now)
                      (Duration .minutes 4))
+   :default true
    :clone-tutorial true
 
    :title "Full body gym workout",

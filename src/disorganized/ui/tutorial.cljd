@@ -408,7 +408,11 @@ Instead of recreating the table for each recipe, just clone an old recipe and it
   (when (and (not kIsWeb)
              (recent-user?)
              (not premium?)
-             (>= (count (remove :default saved-notes)) 1)
+             ;;Second real note, not first: the July 2026 cohort showed a user
+             ;;uninstalling right after getting this prompt 44s into their first
+             ;;session. One note (minutes into first use) is too weak a signal
+             ;;to ask for notification permission on.
+             (>= (count (remove :default saved-notes)) 2)
              ;;This runs from a post-frame callback that can fire while the editor
              ;;is pushed over the home screen — only prompt when home is on top.
              (when-let [route (m/ModalRoute.of ctx)] (.-isCurrent route)))
