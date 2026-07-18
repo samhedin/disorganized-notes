@@ -137,8 +137,8 @@ Click at the bottom left to add a section, then add a tag so you can find this n
    :sections (let [id (str (random-uuid))]
                {id {"checkboxes-visible" true, "section-position" 0, "id" id, "name" "Try this", "content"
                     [{"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Check off an item (tap the circle)"}
-                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Click bottom left to add a new section"}
-                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Add a tag to organize this note"}
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "At the very bottom left: Click to add a new section"}
+                     {"children" [], "id" (str (random-uuid)), "checkbox" false, "data" "Also at bottom left: Add a tag to quickly find this note later."}
                      ;;The bridge out of the tutorial: July 2026 cohort users
                      ;;finished this checklist and uninstalled — nothing pointed
                      ;;them at making their own note.
