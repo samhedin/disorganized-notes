@@ -709,6 +709,19 @@
     .animationDuration (Duration .seconds 4)
     .child child)))
 
+(defn sanitize-param
+  "Make an arbitrary value safe to hand to `log-analytics`, which rejects
+  hyphens outright and is fed to GA4, which truncates values past 100 chars.
+  Exception text violates both — it carries package names like firebase-auth,
+  punctuation, quotes and newlines — so squash everything that isn't a word
+  character down to a single underscore rather than asserting on it."
+  [v]
+  (let [s (-> (str v)
+              (string/replace #"[^A-Za-z0-9_]+" "_"))
+        s (subs s 0 (min 100 (count s)))
+        s (string/replace s #"^_+|_+$" "")]
+    (if (string/blank? s) "unknown" s)))
+
 (defn log-analytics
   "DON'T PUT SPACES IN HERE"
   ([name] (log-analytics name {}))

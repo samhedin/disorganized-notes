@@ -623,6 +623,25 @@
                           (println "Couldn't fetch and activate rc")
                           nil))]))
 
+(defn log-error-to-analytics
+  "Mirror an error into GA4. Crashlytics writes its report to disk and only
+  uploads it on the *next* app start, so a user who hits an error and then
+  uninstalls never delivers one — that is why the July 2026 cohort showed five
+  GA4 app_exception events and zero Crashlytics reports. GA4 does deliver
+  in-session (those app_exception events are the proof), so send the exception
+  class and the head of its message there as well. Swallow any failure of our
+  own reporting: it would come straight back through the handler below and
+  loop."
+  [error]
+  (try
+    (await (utils/log-analytics
+            "dart_error"
+            {"type" (utils/sanitize-param (.-runtimeType error))
+             "msg" (utils/sanitize-param error)}))
+    (catch dynamic e
+      (println "Couldn't log error to analytics")
+      nil)))
+
 (defn main
   []
   (f_widgets/WidgetsFlutterBinding.ensureInitialized)
@@ -638,14 +657,23 @@
   (model/register!)
   (.enable FlutterCryptography)
   (when (and (not kDebugMode) (not kIsWeb))
+    ;;Both handlers record non-fatally. `fatal` reports are held on disk until
+    ;;the next app start, and the users worth diagnosing uninstall instead of
+    ;;relaunching, so marking them fatal buys an accurate crash-free-users
+    ;;metric at the cost of the traces themselves. Non-fatals have a chance of
+    ;;going out during the session that produced them.
     (set! (.-onError FlutterError)
-          (.-recordFlutterFatalError FirebaseCrashlytics.instance))
+          (fn [details]
+            (FirebaseCrashlytics.instance.recordFlutterError details)
+            (log-error-to-analytics (.-exception details))
+            nil))
     ;;FlutterError.onError only catches framework errors. Uncaught async errors
     ;;otherwise crash without reaching Crashlytics (seen as GA4 app_exception
     ;;with no Crashlytics report, July 2026 cohort).
     (set! (.-onError PlatformDispatcher.instance)
           (fn [error stack]
-            (FirebaseCrashlytics.instance.recordError error stack .fatal true)
+            (FirebaseCrashlytics.instance.recordError error stack .fatal false)
+            (log-error-to-analytics error)
             true)))
 
   (f/run

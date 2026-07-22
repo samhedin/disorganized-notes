@@ -46,10 +46,12 @@ android {
 	multiDexEnabled true
         //minSdk = flutter.minSdkVersion
 	
-	// "One or more of the APIs you use or parameters that you set for edge-to-edge and window display have been deprecated in Android 15. 
-	// https://github.com/flutter/flutter/issues/160328
-	// https://github.com/flutter/flutter/issues/163545
-        targetSdk = 35
+	// Play requires targeting Android 16 (API 36) from Aug 31, 2026.
+	// Previously pinned to 35 because of the Android 15 edge-to-edge deprecations
+	// (https://github.com/flutter/flutter/issues/160328,
+	//  https://github.com/flutter/flutter/issues/163545) — those were already in
+	// effect at targetSdk 35, and Flutter 3.41 handles edge-to-edge natively.
+        targetSdk = 36
 	
         versionCode = flutter.versionCode
         versionName = flutter.versionName
@@ -83,7 +85,7 @@ flutter {
 
 // The home_widget plugin declares 'androidx.glance:glance-appwidget:1.+', which
 // resolves to 1.3.0-alpha01 — an alpha that requires compileSdk 37 / AGP 9.1.0.
-// Pin the whole glance group to the latest stable so we stay on compileSdk 36 / AGP 8.12.3.
+// Pin the whole glance group to the latest stable so we stay on compileSdk 36 / AGP 8.13.2.
 // 1.1.1 is a stable patch that compiles against protobuf 4.28.2 to address CVE-2024-7254.
 configurations.all {
     resolutionStrategy {
@@ -93,21 +95,18 @@ configurations.all {
 }
 
 dependencies {
-    implementation 'com.facebook.infer.annotation:infer-annotation:0.18.0'
-    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.6.2"
-    implementation 'com.google.ads.mediation:facebook:6.19.0.1'
+    implementation "androidx.lifecycle:lifecycle-runtime-ktx:2.11.0"
     implementation 'androidx.appcompat:appcompat:1.7.1'
-    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
-    implementation 'androidx.window:window:1.0.0'
-    implementation 'androidx.window:window-java:1.0.0'
-    implementation 'com.android.billingclient:billing:6.0.1'
-    
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.5'
+    implementation 'androidx.window:window:1.5.1'
+    implementation 'androidx.window:window-java:1.5.1'
+    // billing: no explicit version — purchases_flutter (RevenueCat) pins the
+    // BillingClient version it is built against.
+
     // Jetpack Glance dependencies
     implementation 'androidx.glance:glance-appwidget:1.1.1'
-    implementation 'androidx.compose.ui:ui:1.6.0'
-    implementation 'androidx.compose.material3:material3:1.2.0'
-
-
+    implementation 'androidx.compose.ui:ui:1.11.4'
+    implementation 'androidx.compose.material3:material3:1.4.0'
 }
 
 repositories {

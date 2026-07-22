@@ -97,7 +97,13 @@ then sign in with the same account.")
        "/"))
   nil)
 
-(defn redirect-to-first-note [ctx]
+(defn redirect-to-first-note
+  "Onboarding landing for a *brand new* account, however it was created —
+  Get started (anonymous) or registering outright. Both get the identical
+  seeded welcome note; `via` only records which door they came through.
+  Existing users upgrading an anonymous account already have notes: send them
+  through `redirect` instead, or they get a second welcome note."
+  [ctx via]
   (println "redirecting")
   ;;Seed a starter note (structure + a short checklist) instead of a blank page,
   ;;so the first thing a new user sees demonstrates how notes work.
@@ -106,7 +112,7 @@ then sign in with the same account.")
     (rd/dispatch [::model/refresh-notes])
     ;;The welcome note is seeded, not user-created — funnel counts the first
     ;;*real* note elsewhere (see the note-count watcher in read/list-notes).
-    (utils/log-analytics "onboarding_welcome_seeded")
+    (utils/log-analytics "onboarding_welcome_seeded" {"via" via})
     (rd/dispatch [::model/set-new-plaintext (:plaintext note)])
     (rd/dispatch [::model/set-key :override-title (str (:title note))])
     (-> ctx
@@ -185,7 +191,7 @@ then sign in with the same account.")
                          (utils/log-analytics "welcome_get_started_clicked")
                          (await (FirebaseAuth.instance.signInAnonymously))
                          (user-created nil)
-                         (redirect-to-first-note ctx))
+                         (redirect-to-first-note ctx "get_started"))
 
             .child (f/widget
                     :padding {:horizontal 20
@@ -208,42 +214,6 @@ then sign in with the same account.")
          .child (m/Text "I've used this app before")))])))))
 
 
-
-(defn anonymous []
-  (f/widget
-   :context ctx
-   :get {{tthm .-textTheme} m/Theme}
-   :watch [clicked? (atom false) :as *clicked?]
-   :get [m/Navigator]
-   (m/AnimatedSwitcher
-    .duration (Duration .milliseconds 300)
-    .child
-    (if clicked?
-      (m/Container
-       .width 200
-       .child (m/LinearProgressIndicator))
-      (m/Row
-       .children
-       [(m/Expanded
-         .child (f/widget
-                 :padding {:horizontal 20}
-                 (m/ElevatedButton.icon
-                  .icon (m/Icon m/Icons.fast_forward
-                                .size 30)
-
-                  .label
-                  (f/widget
-                   :padding {:vertical 10}
-                   (m/Text "Skip registration"
-                           .style (.-titleLarge tthm)))
-
-                  .onPressed (fn []
-                               (reset! *clicked? true)
-                               (await (FirebaseAuth.instance.signInAnonymously))
-                               (user-created nil)
-                               (redirect ctx)
-
-                               nil))))])))))
 
 (defn register-sign-up []
   (f/widget
@@ -295,31 +265,20 @@ then sign in with the same account.")
 
      (if (not uid?)
        (uia/SignInScreen
+        ;;No "Skip registration" here any more. It signed the user in
+        ;;anonymously and seeded the welcome note — exactly what Get started on
+        ;;the previous screen does — so it was a second door onto the same
+        ;;path. Users who arrive here without an account go back and use Get
+        ;;started; this screen is now only for people who really do have one.
         .sideBuilder (fn [_ _]
-                       (f/widget
-                        :get {{tthm .-textTheme} m/Theme}
-
-                        (if (or kDebugMode (not kIsWeb))
-                          (m/ConstrainedBox
-                           .constraints
-                           (m/BoxConstraints
-                            .maxWidth 200
-                            .maxHeight 200)
-                           .child (anonymous))
-
-                          (web-notice))))
+                       (if (or kDebugMode (not kIsWeb))
+                         (m/SizedBox.shrink)
+                         (web-notice)))
 
         .headerBuilder
         (fn [_ _ _]
           (if (or kDebugMode (not kIsWeb))
-            (f/widget
-             :padding {:top 30}
-             :get {{tthm .-textTheme} m/Theme}
-
-             (m/Column
-              .children
-              [(anonymous)]))
-
+            (m/SizedBox.shrink)
             (web-notice)))
 
         .footerBuilder
@@ -343,7 +302,9 @@ then sign in with the same account.")
         [(#/(uia/AuthStateChangeAction uia/UserCreated)
           (fn [context state]
             (user-created prefs)
-            (redirect context)
+            ;;No uid before this, so the account is brand new — it gets the same
+            ;;seeded welcome note as Get started.
+            (redirect-to-first-note context "registration")
 
             nil))
 
@@ -380,7 +341,10 @@ then sign in with the same account.")
         [(#/(uia/AuthStateChangeAction uia/UserCreated)
           (fn [context state]
             (user-created prefs)
-            (redirect-to-first-note ctx)))
+            ;;This branch only runs with a uid already present, i.e. an
+            ;;anonymous user upgrading. They have notes already — seeding here
+            ;;would hand them a second welcome note.
+            (redirect ctx)))
 
          (#/(uia/AuthStateChangeAction uia/CredentialLinked)
           (fn [context state]

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Resource-shrinking safelist. These resources are referenced only from AndroidManifest
+  meta-data / by name at runtime, which shrinkResources can't see, so it would strip them
+  and break notifications. Keep them explicitly.
+    - notification_icon: com.google.firebase.messaging.default_notification_icon (FCM)
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/notification_icon" />
